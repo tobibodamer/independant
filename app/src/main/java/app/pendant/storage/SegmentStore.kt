@@ -10,6 +10,7 @@ import android.util.Log
 import app.pendant.codec.SegmentWriters
 import app.pendant.settings.StorageMode
 import java.io.File
+import java.io.FileOutputStream
 
 /** One listing entry, backend-agnostic. */
 abstract class SegmentInfo(
@@ -106,9 +107,11 @@ private const val TAG = "PendantStorage"
  * locations, so clips stay playable and managed after a mode switch.
  *
  * Modes:
- * - [StorageMode.MUSIC] (default): MediaStore rows under [MUSIC_RELATIVE_PATH]
- *   (RELATIVE_PATH) — no permissions needed on API 29+. MediaStore rows cannot be
- *   renamed, so no `_NNs` duration suffix; duration comes from the DURATION column.
+ * - [StorageMode.MUSIC] (default): segments are buffered app-privately and finished
+ *   clips are published to MediaStore rows under [MUSIC_RELATIVE_PATH] at finalize
+ *   ([PublishingSegmentSink]); the public folder only ever gains whole files, which
+ *   makes it safe to watch with a sync engine (Syncthing et al.). Duration suffix
+ *   comes with the final name; the DURATION column is written as well.
  * - [StorageMode.APP_PRIVATE]: classic files in Android/data/…/files/recordings.
  * - [StorageMode.CUSTOM]: SAF tree (usually Music) picked by the user, written to
  *   `<tree>/Pendant`; those files keep the `_NNs` duration-suffix rename.
@@ -124,6 +127,30 @@ class SegmentStore(private val context: Context) {
         private const val PENDING_SWEEP_MS = 60L * 60 * 1000
         private const val DAY_MS = 24L * 60 * 60 * 1000
         private const val GB_BYTES = 1024L * 1024 * 1024
+
+        /** The app-private recordings directory (created on demand). */
+        internal fun appPrivateDir(context: Context): File =
+            File(context.getExternalFilesDir(null) ?: context.filesDir, "recordings").also { it.mkdirs() }
+
+        /** Staging dir for segments under construction — outside every clip listing. */
+        internal fun stagingDir(context: Context): File =
+            File(context.getExternalFilesDir(null) ?: context.filesDir, "staging").also { it.mkdirs() }
+
+        /** Moves a finished clip file into the app-private recordings dir (rename, else byte copy). */
+        internal fun moveIntoRecordings(recordingsDir: File, file: File): Boolean {
+            recordingsDir.mkdirs()
+            val target = File(recordingsDir, file.name)
+            if (file.renameTo(target)) return true
+            // Same-volume renames practically never fail; the copy is belt and braces.
+            // Timestamp names make collisions all but impossible.
+            return try {
+                file.inputStream().use { ins -> FileOutputStream(target).use { outs -> ins.copyTo(outs) } }
+                file.delete()
+            } catch (e: Exception) {
+                Log.w(TAG, "cannot move ${file.name}", e)
+                false
+            }
+        }
     }
 
     data class Location(
@@ -205,14 +232,13 @@ class SegmentStore(private val context: Context) {
         val base = SegmentNames.baseName(ext(), startWallClockMs)
         return when (location.mode) {
             StorageMode.APP_PRIVATE -> FileSegmentSink(appPrivateDir(), base)
-            StorageMode.MUSIC -> MediaStoreSegmentSink(context, containerMime(), base)
+            StorageMode.MUSIC -> PublishingSegmentSink(context, containerMime(), base)
             StorageMode.CUSTOM -> SafSegmentSink(context, location.customTreeUri, containerMime(), base)
         }
     }
 
     /** The app-private recordings dir (created on demand). */
-    private fun appPrivateDir(): File =
-        File(context.getExternalFilesDir(null) ?: context.filesDir, "recordings").also { it.mkdirs() }
+    private fun appPrivateDir(): File = appPrivateDir(context)
 
     /** App-private recordings path for the Settings UI. */
     fun appPrivatePath(): String = appPrivateDir().absolutePath
@@ -230,6 +256,7 @@ class SegmentStore(private val context: Context) {
      * so run it off the main thread.
      */
     fun list(): List<SegmentInfo> {
+        recoverStagedClips()
         val files = appPrivateList()
         val media = mediaStoreList()
         val saf = safList()
@@ -436,6 +463,7 @@ class SegmentStore(private val context: Context) {
         } else {
             0L
         }
+        recoverStagedClips()
         var deleted = 0
         deleted += cleanupAppPrivate(cap, ageCutoff)
         deleted += cleanupMediaStore(cap, ageCutoff)
@@ -472,10 +500,53 @@ class SegmentStore(private val context: Context) {
         false
     }
 
+    /**
+     * Rescues finished clips that never reached their publish step (process death
+     * while queued) into the app-private listing, and drops stale never-finalized
+     * staging leftovers. Must run on the publish thread: an in-flight publish owns
+     * its staging file, so recovery may not touch staging concurrently.
+     */
+    private fun recoverStagedClips() {
+        onPublishThread {
+            val staged = stagingDir(context).listFiles { f -> f.isFile } ?: return@onPublishThread
+            val finished = ArrayList<File>()
+            val stale = ArrayList<File>()
+            val deadCutoff = System.currentTimeMillis() - DAY_MS
+            for (f in staged) {
+                if (f.length() == 0L && SegmentNames.parseDurationMs(f.name) == 0L) {
+                    f.delete() // empty artifact, never contained audio
+                } else if (SegmentNames.parseDurationMs(f.name) > 0L) {
+                    finished.add(f)
+                } else if (f.lastModified() < deadCutoff) {
+                    // Open segment torn off mid-write: no configured segment length
+                    // approaches a day, so this one can never finalize again.
+                    stale.add(f)
+                }
+            }
+            if (finished.isEmpty() && stale.isEmpty()) return@onPublishThread
+            val mediaNames = try {
+                mediaStoreQuery().mapTo(HashSet()) { it.name }
+            } catch (e: Exception) {
+                Log.w(TAG, "staging recovery: media scan failed", e)
+                HashSet<String>()
+            }
+            for (f in finished) {
+                if (f.name in mediaNames) {
+                    f.delete() // twin of an already-published clip
+                } else if (!moveIntoRecordings(appPrivateDir(), f)) {
+                    Log.w(TAG, "cannot rescue staged clip ${f.name}")
+                }
+            }
+            for (f in stale) {
+                f.delete()
+            }
+        }
+    }
+
     /** Deletes MediaStore rows of segments the app died in the middle of. */
     private fun mediaStorePendingSweep(): Int = try {
         val selection = "${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ?" +
-            " AND ${MediaStore.MediaColumns.IS_PENDING} = 1 AND ${MediaStore.MediaColumns.SIZE} = 0" +
+            " AND ${MediaStore.MediaColumns.IS_PENDING} = 1" +
             " AND ${MediaStore.MediaColumns.DATE_MODIFIED} < ?"
         val cutoffSec = (System.currentTimeMillis() - PENDING_SWEEP_MS) / 1000
         resolver.query(

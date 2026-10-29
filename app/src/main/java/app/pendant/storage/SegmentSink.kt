@@ -1,7 +1,6 @@
 package app.pendant.storage
 
 import android.content.ContentResolver
-import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Context
 import android.net.Uri
@@ -13,7 +12,9 @@ import app.pendant.codec.SegmentDestination
 import app.pendant.codec.SegmentWriters
 import java.io.BufferedOutputStream
 import java.io.File
+import java.io.FileOutputStream
 import java.io.IOException
+import java.util.concurrent.Executors
 
 /** Destination of one segment: hands bytes to the codec writer, then finalizes or discards. */
 abstract class SegmentSink {
@@ -56,74 +57,134 @@ class FileSegmentSink(private val dir: File, baseName: String) : SegmentSink() {
 }
 
 /**
- * MediaStore destination: inserts a row in `Music/Pendant` (IS_PENDING) up front and
- * streams into it. MediaStore rows cannot be renamed, so no duration-suffix rename
- * happens here — the list UI reads the DURATION column instead. Short segments never
- * prove their length → the row (empty file) is deleted via [discard], preserving the
- * "short segments leave nothing behind" semantics.
+ * Music-folder destination that buffers the segment in an app-private staging
+ * folder and publishes the *finished* clip into `Music/Pendant` at finalize.
+ *
+ * Sync-friendly: the public folder only ever gains complete files under their
+ * final `_NNs` name and nothing there is modified after creation — sync engines
+ * never see partial audio or renames. Publishing runs on a single background
+ * thread, in segment order, off the capture loop: the finished staging file is
+ * inserted as a fresh MediaStore row that stays IS_PENDING while the bytes land,
+ * so a crash mid-copy cannot expose a partial file (the store's pending-row
+ * sweep removes dead rows). A crash before the publish leaves the suffixed file
+ * in staging; [SegmentStore]'s staging recovery rescues it into the app-private
+ * listing so no audio is lost.
  */
-class MediaStoreSegmentSink(
+class PublishingSegmentSink(
     context: Context,
     mime: String,
     baseName: String,
 ) : SegmentSink() {
 
     private val resolver = context.contentResolver
-    private val uri: Uri? = try {
-        val values = ContentValues().apply {
-            put(MediaStore.MediaColumns.DISPLAY_NAME, baseName)
-            put(MediaStore.MediaColumns.MIME_TYPE, mime)
-            put(MediaStore.MediaColumns.RELATIVE_PATH, SegmentStore.MUSIC_RELATIVE_PATH)
-            put(MediaStore.MediaColumns.IS_PENDING, 1)
-        }
-        resolver.insert(MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY), values)
-    } catch (e: Exception) {
-        Log.e(TAG, "MediaStore insert failed", e)
-        null
-    }
+    private val mime = mime
+    private val baseName = baseName
+    /** Segment under construction; hidden from every clip listing until published. */
+    private val staged = File(SegmentStore.stagingDir(context), baseName)
+    /** Where the rescue path puts an unpublished finished clip. */
+    private val recordingsDir = SegmentStore.appPrivateDir(context)
 
-    override fun openOutput(): SegmentDestination? {
-        val u = uri ?: return null
-        return try {
-            if (SegmentWriters.format == SegmentWriters.Format.AAC) {
-                // MediaMuxer needs a FileDescriptor; media rows can be opened as "rw".
-                val pfd = resolver.openFileDescriptor(u, "rw") ?: return null
-                SegmentDestination.AsFd(pfd)
-            } else {
-                val s = resolver.openOutputStream(u, "w") ?: return null
-                SegmentDestination.AsStream(BufferedOutputStream(s, 32 * 1024))
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "cannot open MediaStore output", e)
-            null
-        }
-    }
+    override fun openOutput(): SegmentDestination = SegmentDestination.AsFile(staged)
 
     override fun finalize(durationMs: Long) {
-        val u = uri ?: return
-        try {
-            // Publishing the row is the critical step; do it alone so a rejected
-            // DURATION write cannot leave the file pending forever.
-            val publish = ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }
-            runCatching { resolver.update(u, publish, null, null) }
-                .onFailure { Log.w(TAG, "MediaStore publish failed", it) }
-            // Best effort; MediaProvider may treat DURATION as read-only.
-            val duration = ContentValues().apply { put(MediaStore.Audio.AudioColumns.DURATION, durationMs) }
-            runCatching { resolver.update(u, duration, null, null) }
+        if (!staged.exists()) return
+        val target = File(staged.parentFile!!, SegmentNames.finalizedName(baseName, durationMs))
+        // Rename staging → final name first; after this the publish thread owns
+        // the file exclusively (name/path never change again).
+        if (!staged.renameTo(target)) {
+            Log.w(TAG, "staged rename failed; $baseName stays in staging")
+            return
+        }
+        publishExecutor.execute {
+            try {
+                publish(target, durationMs)
+            } catch (e: Exception) {
+                Log.w(TAG, "publish crashed", e)
+                rescue(target)
+            }
+        }
+    }
+
+    /**
+     * Insert, copy, publish. Any failure downgrades the clip to the app-private
+     * recordings listing (fully playable/shareable) instead of dropping audio.
+     */
+    private fun publish(finished: File, durationMs: Long) {
+        val row = try {
+            val values = ContentValues().apply {
+                // Insert under the final, duration-suffixed name — no rename later.
+                put(MediaStore.MediaColumns.DISPLAY_NAME, finished.name)
+                put(MediaStore.MediaColumns.MIME_TYPE, mime)
+                put(MediaStore.MediaColumns.RELATIVE_PATH, SegmentStore.MUSIC_RELATIVE_PATH)
+                put(MediaStore.MediaColumns.IS_PENDING, 1)
+            }
+            resolver.insert(MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY), values)
         } catch (e: Exception) {
-            Log.w(TAG, "MediaStore finalize failed", e)
+            Log.w(TAG, "publish insert failed", e)
+            null
+        }
+        if (row == null) {
+            rescue(finished)
+            return
+        }
+        val copied = try {
+            resolver.openOutputStream(row, "w")?.use { outs ->
+                finished.inputStream().use { ins -> ins.copyTo(outs) }
+            } != null
+        } catch (e: Exception) {
+            Log.w(TAG, "publish copy failed", e)
+            false
+        }
+        if (!copied) {
+            try {
+                resolver.delete(row, null, null)
+            } catch (e: Exception) {
+                Log.w(TAG, "publish row cleanup failed", e)
+            }
+            rescue(finished)
+            return
+        }
+        // Publishing the row is the critical step; the DURATION column is best
+        // effort (MediaProvider may treat it as read-only).
+        try {
+            resolver.update(row, ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }, null, null)
+        } catch (e: Exception) {
+            Log.w(TAG, "MediaStore publish failed", e)
+        }
+        try {
+            val duration = ContentValues().apply { put(MediaStore.Audio.AudioColumns.DURATION, durationMs) }
+            resolver.update(row, duration, null, null)
+        } catch (_: Exception) {
+        }
+        finished.delete()
+    }
+
+    /** Moves a finished-but-unpublished clip into the app-private recordings listing. */
+    private fun rescue(finished: File) {
+        if (SegmentStore.moveIntoRecordings(recordingsDir, finished)) {
+            Log.i(TAG, "publish failed; clip rescued to app-private storage: ${finished.name}")
+        } else {
+            Log.w(TAG, "publish failed and rescue failed for ${finished.name}")
         }
     }
 
     override fun discard() {
-        val u = uri ?: return
         try {
-                val collection = MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
-                resolver.delete(ContentUris.withAppendedId(collection, ContentUris.parseId(u)), null, null)
+            staged.delete()
         } catch (e: Exception) {
-            Log.w(TAG, "MediaStore discard failed", e)
+            Log.w(TAG, "discard failed", e)
         }
     }
+}
+
+/** Serializes publishes and staging recovery; ordered, one at a time, never on the capture thread. */
+internal val publishExecutor by lazy {
+    Executors.newSingleThreadExecutor { r -> Thread(r, "pendant-publish").apply { isDaemon = true } }
+}
+
+/** Runs [action] on the publish thread, in order with any pending publish. */
+internal fun onPublishThread(action: () -> Unit) {
+    publishExecutor.execute(action)
 }
 
 /** Reads a single document or tree attribute; small helper around DocumentsContract queries. */
