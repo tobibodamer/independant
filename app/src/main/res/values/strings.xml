@@ -1,0 +1,10 @@
+<resources>
+    <string name="app_name">Pendant</string>
+    <string name="tile_label">Pendant pause</string>
+    <string name="notif_channel_status">Recording status</string>
+    <string name="notif_channel_status_desc">Shows that Pendant is listening in the background.</string>
+    <string name="notif_channel_quiet">Recording status (no icon)</string>
+    <string name="notif_channel_quiet_desc">Shows that Pendant is listening, without a status bar icon.</string>
+    <string name="notif_channel_alerts">Attention needed</string>
+    <string name="notif_channel_alerts_desc">Tells you when Pendant could not resume recording automatically.</string>
+</resources>
