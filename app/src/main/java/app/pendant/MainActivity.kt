@@ -116,10 +116,14 @@ fun AppRoot(app: PendantApp) {
                     }) { Text("Grant permissions") }
                 }
             } else {
-                when (tab) {
-                    0 -> HomeScreen(app, state)
-                    1 -> RecordingsScreen(app)
-                    2 -> SettingsScreen(app)
+                // weight() keeps the tab row on screen even when the active tab's
+                // content wants more height than is available.
+                Column(Modifier.fillMaxWidth().weight(1f)) {
+                    when (tab) {
+                        0 -> HomeScreen(app, state)
+                        1 -> RecordingsScreen(app)
+                        2 -> SettingsScreen(app)
+                    }
                 }
             }
             Spacer(Modifier.height(12.dp))

@@ -14,15 +14,17 @@ import android.util.Log
 import app.pendant.audio.AudioRoutes
 import app.pendant.audio.ScoController
 import app.pendant.codec.SegmentWriters
+import app.pendant.recording.RecordingController
 import app.pendant.segment.Segmenter
 import app.pendant.settings.Settings
+import app.pendant.storage.SegmentSink
 import app.pendant.storage.SegmentStore
+import app.pendant.settings.StorageMode
 import app.pendant.vad.EnergyVad
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
-import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -61,6 +63,7 @@ class RecordingEngine(
 
     fun start() {
         if (!running.compareAndSet(false, true)) return
+        applyStorageLocation()
         paused.set(false)
         recomputeFrameBuffers()
         registerDeviceCallback()
@@ -111,6 +114,9 @@ class RecordingEngine(
         val oldRate = settings.sampleRate
         val rateChanged = newSettings.sampleRate != oldRate
         this.settings = newSettings
+        // Storage location takes effect for NEW segments (the open recording keeps
+        // writing where it started).
+        applyStorageLocation()
         if (!running.get()) return
         if (rateChanged) {
             segmenter?.finishCurrent(store = true)
@@ -193,17 +199,17 @@ class RecordingEngine(
     )
 
     private val segmentListener = object : Segmenter.Listener {
-        override fun nextSegmentFile(wallClockMs: Long): File? = try {
-            store.newSegmentFile(wallClockMs)
+        override fun nextSegmentSink(wallClockMs: Long): SegmentSink? = try {
+            store.newSegmentSink(wallClockMs)
         } catch (e: Exception) {
-            Log.e(TAG, "cannot create segment file", e)
+            Log.e(TAG, "cannot create segment destination", e)
             RecordingController.postError("Storage unavailable: ${e.message}")
             null
         }
 
-        override fun createWriter(file: File, startWallClockMs: Long) = try {
+        override fun createWriter(sink: SegmentSink, startWallClockMs: Long) = try {
             SegmentWriters.create(
-                file = file,
+                openDestination = { sink.openOutput() },
                 sampleRate = settings.sampleRate,
                 channels = 1,
                 bitrateBps = settings.bitrateBps,
@@ -214,11 +220,11 @@ class RecordingEngine(
             null
         }
 
-        override fun onSegmentStored(file: File, durationMs: Long) {
+        override fun onSegmentStored(sink: SegmentSink, durationMs: Long) {
             try {
-                store.finalizeName(file, durationMs)
+                sink.finalize(durationMs)
             } catch (e: Exception) {
-                Log.w(TAG, "rename failed", e)
+                Log.w(TAG, "finalize failed", e)
             }
             scope.launch {
                 store.cleanup(settings.maxStorageGb, settings.autoDeleteDays)
@@ -232,6 +238,19 @@ class RecordingEngine(
 
         override fun onVoiceActive(active: Boolean) {
             RecordingController.postVoiceActive(active)
+        }
+    }
+
+    private fun applyStorageLocation() {
+        try {
+            store.setLocation(
+                SegmentStore.Location(
+                    mode = settings.storageMode,
+                    customTreeUri = settings.customTreeUri,
+                ),
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "cannot apply storage location", e)
         }
     }
 

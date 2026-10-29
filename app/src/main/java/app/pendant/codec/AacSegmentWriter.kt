@@ -3,21 +3,26 @@ package app.pendant.codec
 import android.media.MediaCodec
 import android.media.MediaFormat
 import android.media.MediaMuxer
+import android.os.ParcelFileDescriptor
 import java.io.File
 import java.nio.ByteBuffer
 
 /**
  * AAC fallback segment writer (.m4a via MediaMuxer), used only on devices whose
- * MediaCodec list contains no Opus encoder. Creates its file immediately and
- * deletes it again if the segment is closed before [minDurationMs].
+ * MediaCodec list contains no Opus encoder. Opens its destination immediately
+ * (MediaMuxer takes a file path or a FileDescriptor, so content-URI containers
+ * supply an open ParcelFileDescriptor) and discards the output again if the
+ * segment closes before [minDurationMs].
  */
 class AacSegmentWriter(
-    private val file: File,
+    dest: SegmentDestination,
     private val sampleRate: Int,
     bitrateBps: Int,
     private val minDurationMs: Long,
 ) : SegmentWriter {
 
+    private val destFile: File? = (dest as? SegmentDestination.AsFile)?.file
+    private val pfd: ParcelFileDescriptor? = (dest as? SegmentDestination.AsFd)?.pfd
     private val codec: MediaCodec
     private val muxer: MediaMuxer
     private val bufferInfo = MediaCodec.BufferInfo()
@@ -40,7 +45,11 @@ class AacSegmentWriter(
         }
         codec.configure(fmt, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
         codec.start()
-        muxer = MediaMuxer(file.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+        muxer = when (dest) {
+            is SegmentDestination.AsFile -> MediaMuxer(dest.file.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+            is SegmentDestination.AsFd -> MediaMuxer(dest.pfd.fileDescriptor, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+            is SegmentDestination.AsStream -> throw IllegalArgumentException("AAC needs a FileDescriptor destination")
+        }
     }
 
     override fun writePcm(samples: ShortArray, count: Int) {
@@ -109,8 +118,14 @@ class AacSegmentWriter(
             } catch (_: Exception) {
             }
             codec.release()
+            // The file-backed output is removed by the store's discard(); the
+            // FileDescriptor here was handed over by the storage layer and must
+            // be closed by us (after the muxer released it).
+            try {
+                pfd?.close()
+            } catch (_: Exception) {
+            }
         }
-        if (durationMs < minDurationMs) file.delete()
     }
 
     override fun close() = finish()

@@ -1,8 +1,8 @@
 package app.pendant.segment
 
 import app.pendant.codec.SegmentWriter
+import app.pendant.storage.SegmentSink
 import app.pendant.vad.EnergyVad
-import java.io.File
 
 /**
  * Turns a continuous stream of VAD-judged frames into files.
@@ -22,14 +22,14 @@ class Segmenter(
     private val listener: Listener,
 ) {
     interface Listener {
-        /** File to write the next segment into (created under the recordings dir). */
-        fun nextSegmentFile(wallClockMs: Long): File?
+        /** Destination for the next segment (in the configured storage location). */
+        fun nextSegmentSink(wallClockMs: Long): SegmentSink?
 
         /** Creates the codec/muxer writer for this segment, or null to skip it. */
-        fun createWriter(file: File, startWallClockMs: Long): SegmentWriter?
+        fun createWriter(sink: SegmentSink, startWallClockMs: Long): SegmentWriter?
 
-        /** Duration is wall-time from segment start; file is already finalized. */
-        fun onSegmentStored(file: File, durationMs: Long)
+        /** Duration is wall-time from segment start; writer is already finalized. */
+        fun onSegmentStored(sink: SegmentSink, durationMs: Long)
 
         /** Called when a segment was discarded (too short to be useful). */
         fun onSegmentDiscarded()
@@ -41,7 +41,7 @@ class Segmenter(
     private val preroll = PrerollRing(prerollMs, sampleRate)
 
     private var writer: SegmentWriter? = null
-    private var segmentFile: File? = null
+    private var segmentSink: SegmentSink? = null
     private var segmentStartMs = 0L
     private var durationMs = 0
     private var speechMs = 0L
@@ -91,13 +91,27 @@ class Segmenter(
     }
 
     private fun startSegment(wallClockMs: Long, firstSamples: ShortArray, firstCount: Int) {
-        val file = listener.nextSegmentFile(wallClockMs) ?: return
-        val w = listener.createWriter(file, wallClockMs) ?: return
-        // Pre-roll first, then the triggering frame.
-        preroll.drainInto(w)
-        w.writePcm(firstSamples, firstCount)
+        val sink = listener.nextSegmentSink(wallClockMs) ?: return
+        val w = listener.createWriter(sink, wallClockMs)
+        if (w == null) {
+            // Encoder failed before anything was written: make sure the pre-registered
+            // destination (e.g. a MediaStore row) leaves nothing behind.
+            sink.discard()
+            return
+        }
+        try {
+            // Pre-roll first, then the triggering frame.
+            preroll.drainInto(w)
+            w.writePcm(firstSamples, firstCount)
+        } catch (e: Exception) {
+            // The writer rejected input before the segment was registered: drop it and
+            // remove its destination, leaving no orphan row/file behind.
+            runCatching { w.close() }
+            sink.discard()
+            throw e
+        }
         writer = w
-        segmentFile = file
+        segmentSink = sink
         segmentStartMs = wallClockMs
         durationMs = (firstCount + preroll.capacitySamples) * 1000 / sampleRate
         speechMs = 0
@@ -107,15 +121,18 @@ class Segmenter(
 
     private fun finishSegment(store: Boolean) {
         val w = writer ?: return
-        val file = segmentFile ?: return
+        val sink = segmentSink ?: return
         writer = null
-        segmentFile = null
+        segmentSink = null
         try {
             w.finish()
         } finally {
             if (store && w.samplesWritten > 0) {
-                listener.onSegmentStored(file, maxOf(durationMs.toLong(), w.samplesWritten * 1000 / sampleRate))
+                listener.onSegmentStored(sink, maxOf(durationMs.toLong(), w.samplesWritten * 1000 / sampleRate))
             } else {
+                // Nothing usable: remove the destination (file, MediaStore row or
+                // SAF document), including any partial bytes already written.
+                sink.discard()
                 listener.onSegmentDiscarded()
             }
         }

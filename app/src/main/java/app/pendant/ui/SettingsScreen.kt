@@ -1,8 +1,13 @@
 package app.pendant.ui
 
 import android.content.Context
+import android.content.Intent
 import android.media.AudioDeviceInfo
 import android.media.AudioManager
+import android.net.Uri
+import android.provider.DocumentsContract
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -24,6 +29,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -38,15 +44,56 @@ import app.pendant.PendantApp
 import app.pendant.settings.BuiltinMicPref
 import app.pendant.settings.RouteMode
 import app.pendant.settings.Settings
+import app.pendant.settings.StorageMode
 import app.pendant.settings.StatusBarIndicator
 import app.pendant.vad.EnergyVad
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+
+/** SAF tree picker that opens directly inside the phone's public Music folder. */
+class OpenTreeInMusic : ActivityResultContracts.OpenDocumentTree() {
+    override fun createIntent(context: Context, input: Uri?): Intent {
+        val intent = super.createIntent(context, input)
+        input?.let { intent.putExtra(DocumentsContract.EXTRA_INITIAL_URI, it) }
+        return intent
+    }
+}
 
 @Composable
 fun SettingsScreen(app: PendantApp) {
     val settings by app.settings.settings.collectAsState(initial = Settings())
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
+
+    val musicInitialUri = remember {
+        DocumentsContract.buildDocumentUri("com.android.externalstorage.documents", "primary:Music")
+    }
+    var customDirDisplay by remember { mutableStateOf(app.store.customDirSummary) }
+    val treePicker = rememberLauncherForActivityResult(OpenTreeInMusic()) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        try {
+            context.contentResolver.takePersistableUriPermission(
+                uri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
+            )
+        } catch (_: SecurityException) {
+            // The picker returned a grant we cannot persist; keep the previous mode.
+            return@rememberLauncherForActivityResult
+        }
+        scope.launch {
+            app.settings.setCustomTreeUri(uri.toString())
+            app.settings.setStorageMode(StorageMode.CUSTOM)
+        }
+    }
+    LaunchedEffect(settings.customTreeUri, settings.storageMode) {
+        if (settings.storageMode == StorageMode.CUSTOM) {
+            withContext(Dispatchers.IO) {
+                app.store.updateCustomDirSummary(settings.customTreeUri)
+                app.store.customDirSummary?.let { customDirDisplay = it }
+            }
+        }
+    }
 
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp),
@@ -79,30 +126,27 @@ fun SettingsScreen(app: PendantApp) {
                 enabled = settings.routeMode != RouteMode.BLUETOOTH_ONLY,
                 onSelected = { scope.launch { app.settings.setBuiltinMic(BuiltinMicPref.valueOf(it)) } },
             )
-            Text(
-                text = "Captured audio: ${settings.sampleRate / 1000} kHz mono.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
             SwitchRow(
-                "Phone's noise suppression & gain",
+                "Phone's noise suppression",
                 settings.phoneProcessing,
-                "Off gives cleaner audio for later transcription; on may help in loud places.",
+                "Off gives cleaner audio; on helps in loud places.",
             ) { scope.launch { app.settings.setPhoneProcessing(it) } }
+            Note("${settings.sampleRate / 1000} kHz mono")
         }
 
         Section("Speech detection") {
             val sensLabels = mapOf(
-                "LOW" to "Only clear speech",
+                "LOW" to "Strict",
                 "MEDIUM" to "Balanced",
-                "HIGH" to "Catch quiet speech",
+                "HIGH" to "Lenient",
             )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 EnergyVad.Sensitivity.entries.forEach { s ->
                     FilterChip(
                         selected = settings.sensitivity == s,
                         onClick = { scope.launch { app.settings.setSensitivity(s) } },
-                        label = { Text(sensLabels[s.name] ?: s.name) },
+                        label = { Text(sensLabels[s.name] ?: s.name, maxLines = 1) },
+                        modifier = Modifier.weight(1f),
                     )
                 }
             }
@@ -148,33 +192,84 @@ fun SettingsScreen(app: PendantApp) {
                 labels = Settings.bitrateChoices().associate { it.toString() to "${it / 1000} kbps" },
                 onSelected = { scope.launch { app.settings.setBitrate(it.toInt()) } },
             )
-            Text(
-                "24–32 kbps Opus is excellent for speech. Higher rates help with music-heavy backgrounds.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            Note("24–32 kbps is excellent for speech")
         }
 
         Section("Battery & visibility") {
             SwitchRow(
                 "Status bar indicator",
                 settings.statusIndicator == StatusBarIndicator.SHOW_ICON,
-                "Shows a small recording icon while active.",
+                "Small recording icon while active.",
             ) { scope.launch { app.settings.setStatusIndicator(if (it) StatusBarIndicator.SHOW_ICON else StatusBarIndicator.HIDE_ICON) } }
             SwitchRow(
                 "Keep CPU awake while recording",
                 settings.keepCpuAwake,
-                "Recommended. Prevents the device from dropping audio during deep sleep.",
+                "Prevents dropped audio during deep sleep.",
             ) { scope.launch { app.settings.setKeepCpuAwake(it) } }
             SwitchRow(
-                "Start recording after phone reboot",
+                "Start recording after reboot",
                 settings.startOnBoot,
-                "On Android 14+ Android may still require one manual start after boot.",
+                "Android may need one manual start after reboot (14+).",
             ) { scope.launch { app.settings.setStartOnBoot(it) } }
+        }
+
+        Section("Storage location") {
+            ChoiceRow(
+                title = "Where clips are saved",
+                value = settings.storageMode.name,
+                options = StorageMode.entries.map { it.name },
+                labels = mapOf(
+                    "MUSIC" to "Music folder (default)",
+                    "APP_PRIVATE" to "App-private folder",
+                    "CUSTOM" to "Custom folder (SAF)",
+                ),
+                onSelected = { opt ->
+                    when (opt) {
+                        "MUSIC" -> scope.launch { app.settings.setStorageMode(StorageMode.MUSIC) }
+                        "APP_PRIVATE" -> scope.launch { app.settings.setStorageMode(StorageMode.APP_PRIVATE) }
+                        "CUSTOM" ->
+                            if (settings.customTreeUri.isNotBlank()) {
+                                scope.launch { app.settings.setStorageMode(StorageMode.CUSTOM) }
+                            } else {
+                                treePicker.launch(musicInitialUri)
+                            }
+                    }
+                },
+            )
+            Note(
+                when (settings.storageMode) {
+                    StorageMode.MUSIC -> "Public Music/Pendant, visible in any file app"
+                    StorageMode.APP_PRIVATE -> "App-private storage"
+                    StorageMode.CUSTOM -> "Custom picked folder"
+                },
+            )
+            if (settings.storageMode == StorageMode.CUSTOM) {
+                Row(
+                    Modifier.fillMaxWidth().clickable { treePicker.launch(musicInitialUri) }.padding(vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Pick custom folder…", style = MaterialTheme.typography.bodyLarge)
+                        Text(
+                            customDirDisplay ?: "not chosen",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+            Note(
+                "Path: " + when (settings.storageMode) {
+                    StorageMode.MUSIC -> "/storage/emulated/0/Music/Pendant"
+                    StorageMode.APP_PRIVATE -> app.store.appPrivatePath()
+                    StorageMode.CUSTOM -> customDirDisplay ?: "not chosen"
+                } + " — applies to new clips",
+            )
         }
 
         Section("Storage") {
             ChoiceRow(
+
                 title = "Auto-delete after",
                 value = settings.autoDeleteDays.toString(),
                 options = Settings.autoDeleteChoices().map { it.toString() },
@@ -188,11 +283,6 @@ fun SettingsScreen(app: PendantApp) {
                 labels = Settings.maxStorageChoices().associate { it.toString() to if (it == 0) "Unlimited" else "$it GB" },
                 onSelected = { scope.launch { app.settings.setMaxStorageGb(it.toInt()) } },
             )
-            Text(
-                text = "Saved to: ${app.store.dir.absolutePath}",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
         }
     }
 }
@@ -201,10 +291,19 @@ fun SettingsScreen(app: PendantApp) {
 private fun Section(title: String, content: @Composable () -> Unit) {
     Card(colors = CardDefaults.cardColors()) {
         Column(Modifier.fillMaxWidth().padding(16.dp), Arrangement.spacedBy(10.dp)) {
-            Text(title, style = MaterialTheme.typography.titleSmall)
+            Text(title, style = MaterialTheme.typography.titleMedium)
             content()
         }
     }
+}
+
+@Composable
+private fun Note(text: String) {
+    Text(
+        text,
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
 }
 
 @Composable
@@ -220,7 +319,7 @@ private fun SwitchRow(
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Column(Modifier.weight(1f)) {
-            Text(title, style = MaterialTheme.typography.bodyMedium)
+            Text(title, style = MaterialTheme.typography.bodyLarge)
             if (subtitle.isNotEmpty()) {
                 Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
@@ -240,7 +339,7 @@ private fun ChoiceRow(
 ) {
     var open by remember { mutableStateOf(false) }
     Column(Modifier.fillMaxWidth().clickable(enabled = enabled) { open = true }) {
-        Text(title, style = MaterialTheme.typography.bodyMedium)
+        Text(title, style = MaterialTheme.typography.bodyLarge)
         Text(
             labels[value] ?: value,
             style = MaterialTheme.typography.bodySmall,
@@ -262,7 +361,7 @@ private fun ChoiceRow(
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             RadioButton(selected = opt == value, onClick = { onSelected(opt); open = false })
-                            Text(labels[opt] ?: opt, style = MaterialTheme.typography.bodyMedium)
+                            Text(labels[opt] ?: opt, style = MaterialTheme.typography.bodyLarge)
                         }
                     }
                 }
@@ -282,7 +381,7 @@ private fun LabeledSlider(
     onChange: (Float) -> Unit,
 ) {
     Column(Modifier.fillMaxWidth()) {
-        Text(label, style = MaterialTheme.typography.bodyMedium)
+        Text(label, style = MaterialTheme.typography.bodyLarge)
         Text(valueText, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
         Slider(
             value = value.coerceIn(min, max),

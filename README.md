@@ -23,7 +23,7 @@ A 24/7 speech-capture app for Android. It listens like a wearable pendant, recor
   - Note: Bluetooth HFP audio is 16 kHz mono (codecs limitation), and while the SCO link is open, music playback pauses.
 - **Quick pause.** Big in-app button, a Quick-Settings tile ("Pendant pause"), and buttons on the ongoing notification. Pausing frees the microphone immediately.
 - **Optional status-bar indicator.** Either a visible recording icon or a "quiet" notification with no icon (activity stays visible in the shade either way — Android requires an ongoing notification for background capture).
-- **Storage care.** Optional auto-delete after N days and a folder size cap (oldest first). Recordings live at `Android/data/app.pendant/files/recordings` and can be shared from the app.
+- **Storage, location & care.** Clips land by default in your phone's public **Music/Pendant** folder (via MediaStore — no permissions needed, and visible in any music or file app so you can play or export clips anywhere). Settings → *Storage location* offers two alternatives: an **app-private folder** (invisible to other apps) and a **custom folder** picked with the system folder picker (the app keeps durable access and creates a `Pendant` subfolder inside it). MediaStore-backed rows cannot be renamed, so those clips carry no `_NNs` duration suffix — their duration comes from the media index; app-private and custom-folder clips keep the classic `…_42s.opus` filenames. Switching the location applies to **new clips** (the recording in progress keeps its folder); the Recordings tab lists, plays, shares and deletes clips from every location in one place. Optional auto-delete after N days and a size cap (oldest first) run across all locations.
 
 ## Building
 

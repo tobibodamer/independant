@@ -2,12 +2,16 @@ package app.pendant.ui
 
 import android.content.Intent
 import android.media.MediaPlayer
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
@@ -22,9 +26,11 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -32,7 +38,11 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
 import app.pendant.PendantApp
+import app.pendant.storage.SegmentInfo
 import app.pendant.storage.SegmentStore
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -41,9 +51,28 @@ import java.util.Locale
 fun RecordingsScreen(app: PendantApp) {
     val context = LocalContext.current
     val store = app.store
-    var recordings by remember { mutableStateOf(store.list()) }
-    var playingPath by remember { mutableStateOf<String?>(null) }
+    val scope = rememberCoroutineScope()
+    var recordings by remember { mutableStateOf<List<SegmentInfo>>(emptyList()) }
+    var playingKey by remember { mutableStateOf<String?>(null) }
     val player = remember { MediaPlayer() }
+
+    suspend fun reload() {
+        recordings = withContext(Dispatchers.IO) { store.list() }
+    }
+
+    LaunchedEffect(Unit) {
+        reload()
+    }
+
+    fun stopPlayback() {
+        if (playingKey != null) {
+            playingKey = null
+            try {
+                player.stop()
+            } catch (_: Exception) {
+            }
+        }
+    }
 
     DisposableEffect(Unit) {
         onDispose {
@@ -69,38 +98,33 @@ fun RecordingsScreen(app: PendantApp) {
             return@Column
         }
         LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            items(recordings, key = { it.file.absolutePath }) { seg ->
+            items(recordings, key = { it.key }) { seg ->
                 Card(colors = CardDefaults.cardColors()) {
                     Row(
                         Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         IconButton(onClick = {
-                            if (playingPath == seg.file.absolutePath) {
-                                playingPath = null
-                                try {
-                                    player.stop()
-                                } catch (_: Exception) {
-                                }
+                            if (playingKey == seg.key) {
+                                stopPlayback()
                             } else {
                                 try {
                                     player.reset()
-                                    player.setDataSource(seg.file.absolutePath)
+                                    player.setDataSource(context, seg.playbackUri())
                                     player.prepare()
                                     player.start()
-                                    playingPath = seg.file.absolutePath
+                                    playingKey = seg.key
                                     player.setOnCompletionListener {
-                                        playingPath = null
+                                        playingKey = null
                                     }
                                 } catch (_: Exception) {
-                                    playingPath = null
+                                    playingKey = null
                                 }
                             }
                         }) {
-                            Icon(
-                                imageVector = if (playingPath == seg.file.absolutePath) Icons.Filled.Delete else Icons.Filled.PlayArrow,
-                                contentDescription = "Play",
-                            )
+                            if (playingKey == seg.key) PauseBars() else {
+                                Icon(Icons.Filled.PlayArrow, contentDescription = "Play")
+                            }
                         }
                         Column(Modifier.weight(1f)) {
                             Text(seg.name, style = MaterialTheme.typography.bodyMedium, maxLines = 1)
@@ -111,22 +135,21 @@ fun RecordingsScreen(app: PendantApp) {
                             )
                         }
                         IconButton(onClick = {
+                            if (playingKey == seg.key) stopPlayback()
                             share(context, seg)
                         }) {
                             Icon(Icons.Filled.Share, contentDescription = "Share")
                         }
                         IconButton(onClick = {
-                            if (playingPath == seg.file.absolutePath) {
-                                playingPath = null
-                                try {
-                                    player.stop()
-                                } catch (_: Exception) {
-                                }
-                            }
+                            stopPlayback()
                             store.delete(seg)
-                            recordings = store.list()
+                            scope.launch { reload() }
                         }) {
-                            Icon(Icons.Filled.Delete, contentDescription = "Delete", tint = MaterialTheme.colorScheme.error)
+                            Icon(
+                                Icons.Filled.Delete,
+                                contentDescription = "Delete",
+                                tint = MaterialTheme.colorScheme.error,
+                            )
                         }
                     }
                 }
@@ -137,9 +160,31 @@ fun RecordingsScreen(app: PendantApp) {
 
 private val nameFmt = SimpleDateFormat("EEE d MMM, HH:mm:ss", Locale.getDefault())
 
-private fun share(context: android.content.Context, seg: SegmentStore.SegmentInfo) {
+/** Two-bar pause glyph (material-icons-core has no Pause icon). */
+@Composable
+private fun PauseBars() {
+    val tint = androidx.compose.material3.LocalContentColor.current
+    Row(
+        Modifier.height(20.dp).padding(horizontal = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(5.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(Modifier.width(6.dp).height(20.dp).background(tint))
+        Box(Modifier.width(6.dp).height(20.dp).background(tint))
+    }
+}
+
+private fun formatTime(ms: Long): String = nameFmt.format(Date(ms))
+
+private fun share(context: android.content.Context, seg: SegmentInfo) {
     try {
-        val uri = FileProvider.getUriForFile(context, "app.pendant.fileprovider", seg.file)
+        // FileProvider cannot share remote content URIs, so MediaStore/SAF clips are
+        // shared via their own content URI; plain files via FileProvider.
+        val uri = seg.shareContentUri() ?: FileProvider.getUriForFile(
+            context,
+            "app.pendant.fileprovider",
+            seg.backingFile ?: return,
+        )
         val send = Intent(Intent.ACTION_SEND).apply {
             type = "audio/*"
             putExtra(Intent.EXTRA_STREAM, uri)
@@ -149,5 +194,3 @@ private fun share(context: android.content.Context, seg: SegmentStore.SegmentInf
     } catch (_: Exception) {
     }
 }
-
-private fun formatTime(ms: Long): String = nameFmt.format(Date(ms))

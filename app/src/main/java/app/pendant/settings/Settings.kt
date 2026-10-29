@@ -35,6 +35,16 @@ enum class BuiltinMicPref {
 
 enum class StatusBarIndicator { SHOW_ICON, HIDE_ICON }
 
+/** Where finished speech segments land. Applies to NEW segments; an open recording keeps its sink. */
+enum class StorageMode {
+    /** Public Music folder via MediaStore (RELATIVE_PATH "Music/Pendant"), no permissions needed. */
+    MUSIC,
+    /** App-private external dir (Android/data/…/files/recordings), always available. */
+    APP_PRIVATE,
+    /** User-picked tree via SAF (OPEN_DOCUMENT_TREE), written into <tree>/Pendant. */
+    CUSTOM,
+}
+
 data class Settings(
     val routeMode: RouteMode = RouteMode.BLUETOOTH_PREFERRED,
     val builtinMic: BuiltinMicPref = BuiltinMicPref.AUTO,
@@ -52,6 +62,8 @@ data class Settings(
     val startOnBoot: Boolean = false,
     val autoDeleteDays: Int = 0,
     val maxStorageGb: Int = 0,
+    val storageMode: StorageMode = StorageMode.MUSIC,
+    val customTreeUri: String = "",
 ) {
     companion object {
         fun hangoverChoices() = intArrayOf(3, 4, 5, 6, 7, 8, 10, 15, 20, 30)
@@ -81,6 +93,8 @@ class PendantSettings(private val context: Context) {
         val startOnBoot = intPreferencesKey("start_on_boot")
         val autoDeleteDays = intPreferencesKey("auto_delete_days")
         val maxStorageGb = intPreferencesKey("max_storage_gb")
+        val storageMode = stringPreferencesKey("storage_mode")
+        val customTreeUri = stringPreferencesKey("custom_tree_uri")
     }
 
     val settings: Flow<Settings> = context.dataStore.data.map { p ->
@@ -103,6 +117,9 @@ class PendantSettings(private val context: Context) {
             startOnBoot = (p[Keys.startOnBoot] ?: 0) == 1,
             autoDeleteDays = p[Keys.autoDeleteDays] ?: 0,
             maxStorageGb = p[Keys.maxStorageGb] ?: 0,
+            storageMode = p[Keys.storageMode]?.let { runCatching { StorageMode.valueOf(it) }.getOrNull() }
+                ?: Settings().storageMode,
+            customTreeUri = p[Keys.customTreeUri] ?: "",
         )
     }
 
@@ -122,4 +139,6 @@ class PendantSettings(private val context: Context) {
     suspend fun setStartOnBoot(v: Boolean) = context.dataStore.edit { it[Keys.startOnBoot] = if (v) 1 else 0 }
     suspend fun setAutoDeleteDays(v: Int) = context.dataStore.edit { it[Keys.autoDeleteDays] = v }
     suspend fun setMaxStorageGb(v: Int) = context.dataStore.edit { it[Keys.maxStorageGb] = v }
+    suspend fun setStorageMode(v: StorageMode) = context.dataStore.edit { it[Keys.storageMode] = v.name }
+    suspend fun setCustomTreeUri(v: String) = context.dataStore.edit { it[Keys.customTreeUri] = v }
 }

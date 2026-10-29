@@ -1,6 +1,8 @@
 package app.pendant.segment
 
+import app.pendant.codec.SegmentDestination
 import app.pendant.codec.SegmentWriter
+import app.pendant.storage.SegmentSink
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -31,23 +33,23 @@ class SegmenterTest {
 
     private class FakeListener : Segmenter.Listener {
         val writers = ArrayList<FakeWriter>()
-        val stored = ArrayList<Pair<File, Long>>()
+        val stored = ArrayList<Pair<SegmentSink, Long>>()
         var discarded = 0
         var nextFileIdx = 0
         var failFiles = false
 
-        override fun nextSegmentFile(wallClockMs: Long): File? =
-            if (failFiles) null else File("seg-${nextFileIdx++}.opus")
+        override fun nextSegmentSink(wallClockMs: Long): SegmentSink? =
+            if (failFiles) null else FakeSink()
 
-        override fun createWriter(file: File, startWallClockMs: Long): SegmentWriter? {
+        override fun createWriter(sink: SegmentSink, startWallClockMs: Long): SegmentWriter? {
             if (failFiles) return null
             val w = FakeWriter()
             writers.add(w)
             return w
         }
 
-        override fun onSegmentStored(file: File, durationMs: Long) {
-            stored.add(file to durationMs)
+        override fun onSegmentStored(sink: SegmentSink, durationMs: Long) {
+            stored.add(sink to durationMs)
         }
 
         override fun onSegmentDiscarded() {
@@ -55,6 +57,19 @@ class SegmenterTest {
         }
 
         override fun onVoiceActive(active: Boolean) {
+        }
+    }
+
+    private class FakeSink : SegmentSink() {
+        var finalized: Long? = null
+        var discarded = 0
+
+        override fun openOutput(): SegmentDestination? = null
+        override fun finalize(durationMs: Long) {
+            finalized = durationMs
+        }
+        override fun discard() {
+            discarded++
         }
     }
 
