@@ -70,6 +70,7 @@ class RecordingEngine(
             start()
         }
         RecordingController.postSourceLabel("Starting…")
+        scope.launch { refreshStats() }
     }
 
     fun pause() {
