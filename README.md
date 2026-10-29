@@ -1,8 +1,11 @@
 <img src="assets/icon.svg" width="64" height="64" alt="">
 
-# Pendant
+# Pendant (repo: *independant*)
 
 A 24/7 speech-capture app for Android. It listens like a wearable pendant, records **only speech**, and stores every utterance as a small file — all locally, nothing leaves the phone.
+
+> **Private repo:** <https://github.com/tobibodamer/independant>
+> The app itself is called *Pendant*; the repository carries the earlier project name *independant*.
 
 ```
 🎙 24/7 mic → VAD gate → Opus (Ogg) encoder → one file per utterance
