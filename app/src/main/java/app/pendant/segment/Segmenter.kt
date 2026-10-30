@@ -2,7 +2,10 @@ package app.pendant.segment
 
 import app.pendant.codec.SegmentWriter
 import app.pendant.storage.SegmentSink
+import android.util.Log
 import app.pendant.vad.EnergyVad
+
+private const val TAG = "PendantSegmenter"
 
 /**
  * Turns a continuous stream of VAD-judged frames into files.
@@ -48,6 +51,11 @@ class Segmenter(
     private var silenceMs = 0
     private var rotation = false
 
+    companion object {
+        /** UI speaks-bridge: small inter-word pause still shows "speaking". */
+        const val ON_SCREEN_SPEECH_BRIDGE_MS = 1_200
+    }
+
     /** Feeds one frame. */
     fun feed(samples: ShortArray, count: Int, speech: Boolean, wallClockMs: Long) {
         val w = writer
@@ -57,7 +65,15 @@ class Segmenter(
             return
         }
 
-        w.writePcm(samples, count)
+        try {
+            w.writePcm(samples, count)
+        } catch (e: Exception) {
+            // Blocked by error handling of the writer (keep what got muxed) instead
+            // of letting a zombie writer reject every future frame forever.
+            Log.w(TAG, "writer died mid-segment; closing it out", e)
+            finishSegment(store = true)
+            return
+        }
         durationMs += count * 1000 / sampleRate
 
         if (speech) {
@@ -66,7 +82,11 @@ class Segmenter(
         } else {
             silenceMs += count * 1000 / sampleRate
         }
-        listener.onVoiceActive(speech || silenceMs < hangoverSec * 1000)
+        // Display honesty: "You're speaking" bridges only tiny inter-word pauses
+        // (1.2 s). The 5 s file hangover is storage policy — showing it as live
+        // speech made the status card lie for up to 5 s (and refreshed on every
+        // transient trigger in a noisy room).
+        listener.onVoiceActive(speech || silenceMs < ON_SCREEN_SPEECH_BRIDGE_MS)
 
         if (speech && durationMs >= maxSegmentSec * 1000 && !rotation) {
             rotation = true

@@ -20,6 +20,17 @@ object RecordingController {
         val sourceLabel: String = "",
     )
 
+    /** Live values for the settings-screen level meter, published by the
+     *  running engine so the meter mirrors the real detector and mic route. */
+    data class MicMeter(val levelDb: Float, val thresholdDb: Float, val speaking: Boolean)
+
+    private val _meter = MutableStateFlow<MicMeter?>(null)
+    val meter: StateFlow<MicMeter?> = _meter
+
+    fun postMeter(m: MicMeter?) {
+        _meter.value = m
+    }
+
     private val _state = MutableStateFlow(State.IDLE)
     val state: StateFlow<State> = _state
 
@@ -57,6 +68,7 @@ object RecordingController {
     // ------------------------------------------------------------------
 
     fun start(context: Context) {
+        android.util.Log.i("PendantService", "controller.start requested")
         context.startForegroundService(serviceIntent(context, RecordingService.ACTION_START))
     }
 

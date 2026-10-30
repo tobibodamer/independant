@@ -35,6 +35,14 @@ enum class BuiltinMicPref {
 
 enum class StatusBarIndicator { SHOW_ICON, HIDE_ICON }
 
+/** Which detector decides what counts as speech. */
+enum class Detector {
+    /** Adaptive energy threshold — cheap, reacts to any sound. */
+    ENERGY,
+    /** Silero ONNX neural net — speech-trained; ignores bumps, music, traffic. */
+    SILERO,
+}
+
 /** Where finished speech segments land. Applies to NEW segments; an open recording keeps its sink. */
 enum class StorageMode {
     /** Public Music folder via MediaStore (RELATIVE_PATH "Music/Pendant"), no permissions needed. */
@@ -49,9 +57,21 @@ data class Settings(
     val routeMode: RouteMode = RouteMode.BLUETOOTH_PREFERRED,
     val builtinMic: BuiltinMicPref = BuiltinMicPref.AUTO,
     val preferredBtAddress: String = "",
+    // The opus-encoder wedge occurs at both 16 kHz and 48 kHz (it is a defect of
+    // the sync-mode path in c2.android.opus.encoder, not a sample-rate problem),
+    // so keep the cheaper default; the settings screen still offers 48 kHz.
     val sampleRate: Int = 16_000,
     val bitrateBps: Int = 24_000,
+    val detector: Detector = Detector.ENERGY,
     val sensitivity: EnergyVad.Sensitivity = EnergyVad.Sensitivity.MEDIUM,
+    /** Enter margin in dB above the adaptive floor used when sensitivity == CUSTOM. */
+    val customThresholdDb: Int = EnergyVad.Sensitivity.MEDIUM.enterDb.toInt(),
+    /** true: trigger relative to the adaptive noise floor. false: one fixed absolute level. */
+    val vadTracksFloor: Boolean = true,
+    /** Absolute enter level in dB used when vadTracksFloor == false. */
+    val absoluteThresholdDb: Int = 40,
+    /** Enter probability % for the Silero detector (20–90). */
+    val sileroThresholdPct: Int = 50,
     val hangoverSec: Int = 5,
     val prerollMs: Int = 1000,
     val minSegmentMs: Long = 800,
@@ -82,7 +102,12 @@ class PendantSettings(private val context: Context) {
         val preferredBtAddress = stringPreferencesKey("preferred_bt_address")
         val sampleRate = intPreferencesKey("sample_rate")
         val bitrateBps = intPreferencesKey("bitrate_bps")
+        val detector = stringPreferencesKey("vad_detector")
         val sensitivity = stringPreferencesKey("sensitivity")
+        val customThresholdDb = intPreferencesKey("custom_threshold_db")
+        val vadTracksFloor = intPreferencesKey("vad_tracks_floor")
+        val absoluteThresholdDb = intPreferencesKey("absolute_threshold_db")
+        val sileroThresholdPct = intPreferencesKey("silero_threshold_pct")
         val hangoverSec = intPreferencesKey("hangover_sec")
         val prerollMs = intPreferencesKey("preroll_ms")
         val minSegmentMs = longPreferencesKey("min_segment_ms")
@@ -104,8 +129,14 @@ class PendantSettings(private val context: Context) {
             preferredBtAddress = p[Keys.preferredBtAddress] ?: "",
             sampleRate = p[Keys.sampleRate] ?: 16_000,
             bitrateBps = p[Keys.bitrateBps] ?: 24_000,
+            detector = p[Keys.detector]?.let { runCatching { Detector.valueOf(it) }.getOrNull() }
+                ?: Settings().detector,
             sensitivity = p[Keys.sensitivity]?.let { runCatching { EnergyVad.Sensitivity.valueOf(it) }.getOrNull() }
                 ?: EnergyVad.Sensitivity.MEDIUM,
+            customThresholdDb = p[Keys.customThresholdDb] ?: Settings().customThresholdDb,
+            vadTracksFloor = (p[Keys.vadTracksFloor] ?: 1) == 1,
+            absoluteThresholdDb = p[Keys.absoluteThresholdDb] ?: Settings().absoluteThresholdDb,
+            sileroThresholdPct = p[Keys.sileroThresholdPct] ?: Settings().sileroThresholdPct,
             hangoverSec = p[Keys.hangoverSec] ?: 5,
             prerollMs = p[Keys.prerollMs] ?: 1000,
             minSegmentMs = p[Keys.minSegmentMs] ?: 800,
@@ -128,7 +159,12 @@ class PendantSettings(private val context: Context) {
     suspend fun setPreferredBtAddress(v: String) = context.dataStore.edit { it[Keys.preferredBtAddress] = v }
     suspend fun setSampleRate(v: Int) = context.dataStore.edit { it[Keys.sampleRate] = v }
     suspend fun setBitrate(v: Int) = context.dataStore.edit { it[Keys.bitrateBps] = v }
+    suspend fun setDetector(v: Detector) = context.dataStore.edit { it[Keys.detector] = v.name }
     suspend fun setSensitivity(v: EnergyVad.Sensitivity) = context.dataStore.edit { it[Keys.sensitivity] = v.name }
+    suspend fun setCustomThresholdDb(v: Int) = context.dataStore.edit { it[Keys.customThresholdDb] = v }
+    suspend fun setVadTracksFloor(v: Boolean) = context.dataStore.edit { it[Keys.vadTracksFloor] = if (v) 1 else 0 }
+    suspend fun setAbsoluteThresholdDb(v: Int) = context.dataStore.edit { it[Keys.absoluteThresholdDb] = v }
+    suspend fun setSileroThresholdPct(v: Int) = context.dataStore.edit { it[Keys.sileroThresholdPct] = v }
     suspend fun setHangoverSec(v: Int) = context.dataStore.edit { it[Keys.hangoverSec] = v }
     suspend fun setPrerollMs(v: Int) = context.dataStore.edit { it[Keys.prerollMs] = v }
     suspend fun setMinSegmentMs(v: Long) = context.dataStore.edit { it[Keys.minSegmentMs] = v }

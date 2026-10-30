@@ -1,19 +1,26 @@
 package app.pendant.ui
 
+import android.Manifest
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.media.AudioDeviceInfo
+import android.media.AudioFormat
 import android.media.AudioManager
+import android.media.AudioRecord
+import android.media.MediaRecorder
 import android.net.Uri
 import android.provider.DocumentsContract
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -38,18 +45,29 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import app.pendant.PendantApp
+import app.pendant.recording.RecordingController
 import app.pendant.settings.BuiltinMicPref
 import app.pendant.settings.RouteMode
 import app.pendant.settings.Settings
+import app.pendant.settings.Detector
 import app.pendant.settings.StorageMode
 import app.pendant.settings.StatusBarIndicator
 import app.pendant.vad.EnergyVad
+import app.pendant.vad.SileroVad
+import app.pendant.vad.Vad
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlin.math.roundToInt
 
 /** SAF tree picker that opens directly inside the phone's public Music folder. */
 class OpenTreeInMusic : ActivityResultContracts.OpenDocumentTree() {
@@ -135,21 +153,89 @@ fun SettingsScreen(app: PendantApp) {
         }
 
         Section("Speech detection") {
-            val sensLabels = mapOf(
-                "LOW" to "Strict",
-                "MEDIUM" to "Balanced",
-                "HIGH" to "Lenient",
-            )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                EnergyVad.Sensitivity.entries.forEach { s ->
+                FilterChip(
+                    selected = settings.detector == Detector.ENERGY,
+                    onClick = { scope.launch { app.settings.setDetector(Detector.ENERGY) } },
+                    label = { Text("Energy") },
+                    modifier = Modifier.weight(1f),
+                )
+                FilterChip(
+                    selected = settings.detector == Detector.SILERO,
+                    onClick = { scope.launch { app.settings.setDetector(Detector.SILERO) } },
+                    label = { Text("Silero (AI)") },
+                    modifier = Modifier.weight(1f),
+                )
+            }
+            Note(
+                if (settings.detector == Detector.SILERO) {
+                    "Speech-trained neural net, run on-device: bumps, music and traffic won't open clips — but neither will non-speech sounds."
+                } else {
+                    "Reacts to any sound above the threshold."
+                },
+            )
+            if (settings.detector == Detector.ENERGY) {
+                val sensLabels = mapOf(
+                    "LOW" to "Strict",
+                    "MEDIUM" to "Balanced",
+                    "HIGH" to "Lenient",
+                    "CUSTOM" to "Custom",
+                )
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    EnergyVad.Sensitivity.entries.chunked(2).forEach { rowChips ->
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            rowChips.forEach { s ->
+                                FilterChip(
+                                    selected = settings.sensitivity == s,
+                                    onClick = { scope.launch { app.settings.setSensitivity(s) } },
+                                    enabled = settings.vadTracksFloor,
+                                    label = { Text(sensLabels[s.name] ?: s.name, maxLines = 1) },
+                                    modifier = Modifier.weight(1f),
+                                )
+                            }
+                        }
+                    }
+                }
+                Note(
+                    if (settings.vadTracksFloor) "Chips: threshold margin above the adaptive noise floor." else {
+                        "Fixed level ignores the noise floor — chips don't apply."
+                    },
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     FilterChip(
-                        selected = settings.sensitivity == s,
-                        onClick = { scope.launch { app.settings.setSensitivity(s) } },
-                        label = { Text(sensLabels[s.name] ?: s.name, maxLines = 1) },
+                        selected = settings.vadTracksFloor,
+                        onClick = { scope.launch { app.settings.setVadTracksFloor(true) } },
+                        label = { Text("Above floor") },
+                        modifier = Modifier.weight(1f),
+                    )
+                    FilterChip(
+                        selected = !settings.vadTracksFloor,
+                        onClick = { scope.launch { app.settings.setVadTracksFloor(false) } },
+                        label = { Text("Fixed level") },
                         modifier = Modifier.weight(1f),
                     )
                 }
             }
+            MicLevelMeter(
+                detector = settings.detector,
+                tracksFloor = settings.vadTracksFloor,
+                sensitivity = settings.sensitivity,
+                customThresholdDb = settings.customThresholdDb,
+                absoluteThresholdDb = settings.absoluteThresholdDb,
+                sileroThresholdPct = settings.sileroThresholdPct,
+                onCommitFloorThreshold = { db ->
+                    scope.launch {
+                        app.settings.setSensitivity(EnergyVad.Sensitivity.CUSTOM)
+                        app.settings.setCustomThresholdDb(db)
+                    }
+                },
+                onCommitAbsoluteThreshold = { db ->
+                    scope.launch { app.settings.setAbsoluteThresholdDb(db) }
+                },
+                onCommitSileroThreshold = { pct ->
+                    scope.launch { app.settings.setSileroThresholdPct(pct) }
+                },
+            )
             LabeledSlider(
                 label = "Keep recording while silent (after-speech hold)",
                 valueText = "${settings.hangoverSec} s",
@@ -388,6 +474,249 @@ private fun LabeledSlider(
             onValueChange = onChange,
             valueRange = min..max,
             steps = if (step > 0) ((max - min) / step).toInt() - 1 else 0,
+        )
+    }
+}
+
+/** Absolute dB range the meter bar covers (quiet room ≈ 20, loud speech ≈ 50–60). */
+private const val METER_DB_MAX = 70f
+private const val METER_RATE = 16_000
+
+/**
+ * Discord-style live input meter: the bar is the current level, the vertical
+ * line is the speech threshold (energy detector only — the Silero detector is
+ * probability-based and has no line), and the bar turns green when speech
+ * would be detected.
+ *
+ * Two level sources:
+ * - While the engine records, the meter reads the engine's published VAD values
+ *   (RecordingController.meter) — the real detector, real mic route, no second
+ *   AudioRecord (Samsung doesn't share the input across processes).
+ * - While idle it runs its own 16 kHz AudioRecord with the detector the engine
+ *   would use, so the marker and cue sit exactly where real capture triggers.
+ *
+ * Thresholds per detector: energy = floor-relative margin (5–25 dB), fixed
+ * absolute level (10–60 dB) chosen with the Above floor / Fixed level chips;
+ * Silero = speech probability (20–90 %).
+ *
+ * Dragging the slider commits CUSTOM / fixed / probability. Only a real drag
+ * commits — a plain tap keeps the selected preset.
+ */
+@Composable
+private fun MicLevelMeter(
+    detector: Detector,
+    tracksFloor: Boolean,
+    sensitivity: EnergyVad.Sensitivity,
+    customThresholdDb: Int,
+    absoluteThresholdDb: Int,
+    sileroThresholdPct: Int,
+    onCommitFloorThreshold: (Int) -> Unit,
+    onCommitAbsoluteThreshold: (Int) -> Unit,
+    onCommitSileroThreshold: (Int) -> Unit,
+) {
+    val context = LocalContext.current
+    val permitted = remember {
+        ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
+    }
+    val engineState by RecordingController.state.collectAsState()
+    val engineMeter by RecordingController.meter.collectAsState()
+    val engineIdle = engineState == RecordingController.State.IDLE
+    val silero = detector == Detector.SILERO
+    val activeVal = when {
+        silero -> sileroThresholdPct
+        tracksFloor -> if (sensitivity == EnergyVad.Sensitivity.CUSTOM) customThresholdDb else {
+            sensitivity.enterDb.toInt()
+        }
+        else -> absoluteThresholdDb
+    }
+
+    var levelDb by remember { mutableStateOf(0f) }
+    var thresholdAbsDb by remember { mutableStateOf(0f) }
+    var speaking by remember { mutableStateOf(false) }
+    var micError by remember { mutableStateOf(false) }
+    var micErrorText by remember { mutableStateOf("") }
+
+    LaunchedEffect(
+        detector, tracksFloor, sensitivity, customThresholdDb, absoluteThresholdDb,
+        sileroThresholdPct, permitted, engineIdle,
+    ) {
+        if (!permitted || !engineIdle) return@LaunchedEffect
+        // Same detector the engine would use, so the cue is honest in idle mode.
+        val vad: Vad = if (silero) {
+            SileroVad(context, METER_RATE, sileroThresholdPct / 100f)
+        } else {
+            EnergyVad(
+                METER_RATE,
+                sensitivity,
+                customThresholdDb,
+                fixedEnterDb = if (tracksFloor) null else absoluteThresholdDb.toFloat(),
+            )
+        }
+        val buf = ShortArray(METER_RATE / 50) // 20 ms frames, same cadence as capture
+        var rec: AudioRecord? = null
+        micError = false
+        var smooth = Float.NaN
+        var lastThreshold = Float.NaN
+        thresholdAbsDb = if (tracksFloor) 0f else absoluteThresholdDb.toFloat()
+        try {
+            withContext(Dispatchers.IO) {
+                val minBuf = AudioRecord.getMinBufferSize(
+                    METER_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT,
+                )
+                if (minBuf <= 0) throw IllegalStateException("no audio input available")
+                rec = AudioRecord.Builder()
+                    .setAudioSource(MediaRecorder.AudioSource.MIC)
+                    .setAudioFormat(
+                        AudioFormat.Builder()
+                            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                            .setSampleRate(METER_RATE)
+                            .setChannelMask(AudioFormat.CHANNEL_IN_MONO)
+                            .build(),
+                    )
+                    .setBufferSizeInBytes(maxOf(minBuf * 2, buf.size * 8))
+                    .build()
+                val r = requireNotNull(rec) { "no audio input available" }
+                if (r.state != AudioRecord.STATE_INITIALIZED) throw IllegalStateException("audio input unavailable")
+                r.startRecording()
+                // Mic warm-up: input can stream all-zero frames for ~1 s after start,
+                // and the HAL throws in occasional all-zero frames around sound-trigger
+                // session changes — so only CONSECUTIVE silence (5 s+) is an error.
+                var zeros = 0
+                while (isActive && RecordingController.state.value == RecordingController.State.IDLE) {
+                    val n = r.read(buf, 0, buf.size)
+                    if (n < buf.size) continue
+                    if (buf.all { it == 0.toShort() }) {
+                        if (++zeros > 250) throw IllegalStateException("microphone delivers silence")
+                        continue
+                    }
+                    zeros = 0
+                    vad.process(buf, n)
+                    // Attack faster than release so the bar glides instead of flickering.
+                    val e = vad.energyDb
+                    smooth = if (smooth.isNaN()) e else smooth + (e - smooth) * (if (e > smooth) 0.45f else 0.12f)
+                    val l = (smooth * 2).toInt() / 2f // 0.5 dB display resolution
+                    if (l != levelDb) levelDb = l
+                    val t = (vad.enterThresholdDb * 2).toInt() / 2f
+                    if (t > 0f && t != lastThreshold) {
+                        lastThreshold = t
+                        thresholdAbsDb = t
+                    }
+                    if (speaking != vad.speechActive) speaking = vad.speechActive
+                }
+            }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            // Effect restart / composition teardown — never an error, and the
+            // finally block closes the recorder and idle detector.
+            throw e
+        } catch (e: Exception) {
+            android.util.Log.w("PendantSettings", "level meter mic failed: ${e.message}", e)
+            micError = true
+            micErrorText = e.message ?: e::class.java.simpleName
+        } finally {
+            try {
+                rec?.stop()
+            } catch (_: Exception) {
+            }
+            try {
+                rec?.release()
+            } catch (_: Exception) {
+            }
+            try {
+                vad.close()
+            } catch (_: Throwable) {
+            }
+        }
+    }
+
+    // While the engine records, prefer its published values (real detector + mic route).
+    val shownLevel = engineMeter?.levelDb ?: levelDb
+    val shownThreshold = engineMeter?.thresholdDb ?: thresholdAbsDb
+    val shownSpeaking = engineMeter?.speaking ?: speaking
+
+    val range = when {
+        silero -> 20f..90f
+        tracksFloor -> 5f..25f
+        else -> 10f..60f
+    }
+    var dragVal by remember(
+        detector, tracksFloor, sensitivity, customThresholdDb, absoluteThresholdDb, sileroThresholdPct,
+    ) { mutableStateOf(activeVal.toFloat()) }
+    var moved by remember { mutableStateOf(false) }
+
+    Column(Modifier.fillMaxWidth()) {
+        Canvas(Modifier.fillMaxWidth().height(26.dp)) {
+            val radius = CornerRadius(size.height / 2, size.height / 2)
+            drawRoundRect(color = Color(0xFF232733), cornerRadius = radius)
+            val frac = (shownLevel / METER_DB_MAX).coerceIn(0f, 1f)
+            drawRoundRect(
+                color = if (shownSpeaking) Color(0xFF4CC38A) else Color(0xFF6FA0FF),
+                size = Size(size.width * frac, size.height),
+                cornerRadius = radius,
+            )
+            // Probability-based detectors (Silero) report <= 0 -> no threshold line.
+            if (shownThreshold > 0f) {
+                val mFrac = (shownThreshold / METER_DB_MAX).coerceIn(0f, 1f)
+                drawLine(
+                    color = Color(0xFFFF8A6B),
+                    start = Offset(size.width * mFrac, 0f),
+                    end = Offset(size.width * mFrac, size.height),
+                    strokeWidth = 3.dp.toPx(),
+                )
+            }
+        }
+        Text(
+            when {
+                !permitted -> "Allow microphone access to see the live level"
+                micError -> "Microphone not available right now" +
+                    (if (micErrorText.isNotBlank()) " ($micErrorText)" else "")
+                engineMeter == null && !engineIdle -> "Waiting for the recorder…"
+                shownSpeaking -> "🎤 Speech detected"
+                silero -> "Quiet — the AI records what it recognizes as speech"
+                else -> "Quiet — talking should fill the bar past the line (" +
+                    "%.0f".format(shownThreshold) + " dB)"
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = if (shownSpeaking) Color(0xFF4CC38A) else MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 4.dp),
+        )
+        Text(
+            when {
+                silero -> "Speech probability: ${dragVal.roundToInt()} %"
+                tracksFloor -> "Speech threshold: +${dragVal.roundToInt()} dB above the noise floor"
+                else -> "Speech threshold: ${dragVal.roundToInt()} dB (fixed level)"
+            },
+            style = MaterialTheme.typography.bodyLarge,
+            modifier = Modifier.padding(top = 8.dp),
+        )
+        Slider(
+            value = dragVal.coerceIn(range.start, range.endInclusive),
+            onValueChange = { v ->
+                moved = true
+                dragVal = v
+            },
+            onValueChangeFinished = {
+                if (moved) {
+                    when {
+                        silero -> onCommitSileroThreshold(dragVal.roundToInt())
+                        tracksFloor -> onCommitFloorThreshold(dragVal.roundToInt())
+                        else -> onCommitAbsoluteThreshold(dragVal.roundToInt())
+                    }
+                }
+                moved = false
+            },
+            valueRange = range,
+            steps = (range.endInclusive - range.start).toInt() - 1,
+        )
+        Note(
+            when {
+                silero -> "Higher percentages need more confident speech. " +
+                    "Applies immediately, also during recording."
+                tracksFloor -> "Raise it until desk noise stays under the line while you talk over it. " +
+                    "Applies immediately, also during recording."
+                else -> "One level for every room — good when ambient noise sits just below speech. " +
+                    "Applies immediately, also during recording."
+            },
         )
     }
 }

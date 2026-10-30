@@ -54,5 +54,9 @@ dependencies {
     implementation("androidx.datastore:datastore-preferences:1.1.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
 
+    // Silero VAD (optional detector): ~2 MB speech-trained neural net, runs
+    // fully on-device. The model ships as an asset (silero_vad.onnx).
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.31.1")
+
     testImplementation("junit:junit:4.13.2")
 }

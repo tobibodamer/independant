@@ -33,6 +33,7 @@ class RecordingService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        Log.i(TAG, "service onCreate")
         scope.launch {
             var previous: Settings? = null
             PendantApp.get(this@RecordingService).settings.settings.collectLatest { s ->
@@ -67,6 +68,7 @@ class RecordingService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        Log.i(TAG, "onStartCommand action=${intent?.action}")
         when (intent?.action) {
             ACTION_START -> {
                 if (engine == null) startEngine()

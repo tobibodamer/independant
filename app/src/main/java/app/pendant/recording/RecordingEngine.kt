@@ -16,11 +16,14 @@ import app.pendant.audio.ScoController
 import app.pendant.codec.SegmentWriters
 import app.pendant.recording.RecordingController
 import app.pendant.segment.Segmenter
+import app.pendant.settings.Detector
 import app.pendant.settings.Settings
 import app.pendant.storage.SegmentSink
 import app.pendant.storage.SegmentStore
 import app.pendant.settings.StorageMode
 import app.pendant.vad.EnergyVad
+import app.pendant.vad.SileroVad
+import app.pendant.vad.Vad
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -52,14 +55,35 @@ class RecordingEngine(
 
     private var thread: Thread? = null
     private var wakeLock: PowerManager.WakeLock? = null
+    private var lastErrorPostMs = 0L
 
     // Capture state (touched by the capture thread only, except closeSources from pause)
     private class Rec(val record: AudioRecord, val buffer: ShortArray)
     private val recs = ArrayList<Rec>()
-    @Volatile private var vad = EnergyVad(settings.sampleRate, settings.sensitivity)
+    @Volatile private var vad: Vad = newVad(settings)
+    /** Replaced detector still resident until the capture thread can close it. */
+    @Volatile private var staleVad: Vad? = null
     private var segmenter: Segmenter? = null
     private lateinit var mixed: ShortArray
     private var frameSamples = 0
+
+    /** Silero runs at 16 kHz internally; other rates only matter to the energy detector. */
+    private fun newVad(s: Settings): Vad = when (s.detector) {
+        Detector.SILERO -> SileroVad(context, s.sampleRate, s.sileroThresholdPct / 100f)
+        Detector.ENERGY -> EnergyVad(
+            s.sampleRate,
+            s.sensitivity,
+            s.customThresholdDb,
+            fixedEnterDb = if (s.vadTracksFloor) null else s.absoluteThresholdDb.toFloat(),
+        )
+    }
+
+    /** Swaps the live detector and defers the old session's close to the capture thread. */
+    private fun swapVad(v: Vad) {
+        val old = vad
+        vad = v
+        if (old !== v) staleVad = old
+    }
 
     fun start() {
         if (!running.compareAndSet(false, true)) return
@@ -82,6 +106,7 @@ class RecordingEngine(
         segmenter?.finishCurrent(store = true)
         closeSources()
         releaseWakeLock()
+        RecordingController.postMeter(null)
         RecordingController.postSourceLabel("Paused")
     }
 
@@ -97,13 +122,18 @@ class RecordingEngine(
             return
         }
         try {
-            thread?.join(3000)
+            // The capture thread may be suspended inside a stuck codec call;
+            // interrupt it so stop doesn't spend seconds waiting it out (and
+            // can't leave a ghost capture loop running).
+            thread?.interrupt()
+            thread?.join(2500)
         } catch (_: InterruptedException) {
         }
         thread = null
         unregisterDeviceCallback()
         paused.set(false)
         closeSources()
+        RecordingController.postMeter(null)
         segmenter = null
         releaseWakeLock()
         RecordingController.postSourceLabel("")
@@ -125,7 +155,7 @@ class RecordingEngine(
             recomputeFrameBuffers()
             routeDirty = true
         } else {
-            vad = EnergyVad(newSettings.sampleRate, newSettings.sensitivity)
+            swapVad(newVad(newSettings))
             routeDirty = true
         }
     }
@@ -137,8 +167,14 @@ class RecordingEngine(
     private fun loop() {
         Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO)
         var readFails = 0
+        var meterTick = 0L
+        var meterSmooth = Float.NaN
         while (running.get()) {
             try {
+                // A reconfigure may have swapped the detector mid-frame; the
+                // old one is closed only here, after the capture thread's last
+                // use of it, so close() never races with process().
+                staleVad?.let { try { it.close() } catch (_: Throwable) {} ; staleVad = null }
                 if (routeDirty) {
                     routeDirty = false
                     openSources()
@@ -164,12 +200,35 @@ class RecordingEngine(
                     continue
                 }
                 readFails = 0
+                if (mixed.all { it == 0.toShort() }) {
+                    // Mic warm-up: AudioRecord streams all-zero frames for ~1 s at
+                    // startup. Feeding them would seed the VAD noise floor at the
+                    // digital-silence level and pin speech=true until the floor
+                    // crawled back up (~1 min of "You're speaking").
+                    continue
+                }
                 val speech = vad.process(mixed, n)
+                meterTick++
+                if (meterTick % 2L == 0L) {
+                    val e = vad.energyDb
+                    meterSmooth = if (meterSmooth.isNaN()) e
+                    else meterSmooth + (e - meterSmooth) * (if (e > meterSmooth) 0.45f else 0.12f)
+                    RecordingController.postMeter(
+                        RecordingController.MicMeter(meterSmooth, vad.enterThresholdDb, speech),
+                    )
+                }
                 segmenter?.feed(mixed, n, speech, System.currentTimeMillis())
             } catch (e: InterruptedException) {
                 break
             } catch (e: Exception) {
                 Log.e(TAG, "capture loop error", e)
+                // Surface the problem to the UI (throttled) — silent capture failures
+                // otherwise look like "recording but nothing appears".
+                val nowMs = System.currentTimeMillis()
+                if (nowMs - lastErrorPostMs > 15_000) {
+                    lastErrorPostMs = nowMs
+                    RecordingController.postError("Recording problem: ${e.message ?: e::class.java.simpleName}")
+                }
                 try {
                     Thread.sleep(500)
                 } catch (_: InterruptedException) {
@@ -185,7 +244,7 @@ class RecordingEngine(
         frameSamples = settings.sampleRate * FRAME_MS / 1000
         mixed = ShortArray(frameSamples)
         segmenter = createSegmenter()
-        vad = EnergyVad(settings.sampleRate, settings.sensitivity)
+        swapVad(newVad(settings))
     }
 
     private fun createSegmenter() = Segmenter(
