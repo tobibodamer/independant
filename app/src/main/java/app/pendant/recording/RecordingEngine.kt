@@ -7,6 +7,8 @@ import android.media.AudioDeviceInfo
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioRecord
+import android.media.AudioRecordingConfiguration
+import android.media.AudioTimestamp
 import android.os.Build
 import android.os.PowerManager
 import android.os.Process
@@ -14,10 +16,12 @@ import android.util.Log
 import app.pendant.audio.AudioRoutes
 import app.pendant.audio.ScoController
 import app.pendant.codec.SegmentWriters
+import app.pendant.events.EventLog
 import app.pendant.recording.RecordingController
 import app.pendant.segment.Segmenter
 import app.pendant.settings.Detector
 import app.pendant.settings.Settings
+import app.pendant.storage.SegmentNames
 import app.pendant.storage.SegmentSink
 import app.pendant.storage.SegmentStore
 import app.pendant.settings.StorageMode
@@ -28,6 +32,9 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -56,6 +63,24 @@ class RecordingEngine(
     private var thread: Thread? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private var lastErrorPostMs = 0L
+
+    private val events = EventLog(context)
+    /** Label of the opened route; shown again once another app stops silencing us. */
+    @Volatile private var routeLabel = ""
+    private var loggedRoute: Pair<String, Boolean>? = null
+    /** Android hands our recording silence while a call or voice-chat app holds the mic. */
+    @Volatile private var silenced = false
+
+    // Heartbeat statistics (capture thread only).
+    private var statWindowStartMs = 0L
+    private var statFrames = 0
+    private var statSpeechFrames = 0
+    private var statLevelSumDb = 0.0
+
+    // Overrun detection on the first source (guarded by recs).
+    private var firstSourceFramesRead = 0L
+    private var backlogBaselineFrames = -1L
+    private var reportedLostFrames = 0L
 
     // Capture state (touched by the capture thread only, except closeSources from pause)
     private class Rec(val record: AudioRecord, val buffer: ShortArray)
@@ -94,9 +119,15 @@ class RecordingEngine(
     fun start() {
         if (!running.compareAndSet(false, true)) return
         applyStorageLocation()
+        events.log("start") {
+            put("detector", detectorLabel(settings))
+            put("rate", settings.sampleRate)
+            put("app", appVersion())
+        }
         paused.set(false)
         recomputeFrameBuffers()
         registerDeviceCallback()
+        registerRecordingCallback()
         acquireWakeLock()
         thread = Thread({ loop() }, "pendant-capture").apply { start() }
         RecordingController.postSourceLabel("Starting…")
@@ -108,6 +139,7 @@ class RecordingEngine(
         // Gracefully end any open segment and free the mic while paused.
         segmenter?.finishCurrent(store = true)
         closeSources()
+        events.log("pause")
         releaseWakeLock()
         RecordingController.postMeter(null)
         RecordingController.postSourceLabel("Paused")
@@ -115,6 +147,8 @@ class RecordingEngine(
 
     fun resume() {
         if (!running.get() || !paused.getAndSet(false)) return
+        events.log("resume")
+        loggedRoute = null
         acquireWakeLock()
         routeDirty = true
     }
@@ -122,6 +156,7 @@ class RecordingEngine(
     fun stop() {
         if (!running.compareAndSet(true, false)) {
             unregisterDeviceCallback()
+            unregisterRecordingCallback()
             return
         }
         try {
@@ -134,8 +169,11 @@ class RecordingEngine(
         }
         thread = null
         unregisterDeviceCallback()
+        unregisterRecordingCallback()
         paused.set(false)
         closeSources()
+        events.log("stop")
+        events.close()
         RecordingController.postMeter(null)
         segmenter = null
         releaseWakeLock()
@@ -146,11 +184,19 @@ class RecordingEngine(
     fun reconfigure(newSettings: Settings) {
         val oldRate = settings.sampleRate
         val rateChanged = newSettings.sampleRate != oldRate
+        val oldDetector = detectorLabel(settings)
         this.settings = newSettings
         // Storage location takes effect for NEW segments (the open recording keeps
         // writing where it started).
         applyStorageLocation()
         if (!running.get()) return
+        val detector = detectorLabel(newSettings)
+        if (rateChanged || detector != oldDetector) {
+            events.log("config") {
+                put("detector", detector)
+                put("rate", newSettings.sampleRate)
+            }
+        }
         if (rateChanged) {
             segmenter?.finishCurrent(store = true)
             segmenter = null
@@ -229,6 +275,9 @@ class RecordingEngine(
                         continue
                     }
                     val speech = vad.process(mixed, count)
+                    statFrames++
+                    if (speech) statSpeechFrames++
+                    statLevelSumDb += vad.energyDb
                     if (metered && ++meterTick % 2L == 0L) {
                         val e = vad.energyDb
                         meterSmooth = if (meterSmooth.isNaN()) e
@@ -242,6 +291,7 @@ class RecordingEngine(
                 }
                 carry = total - off
                 if (carry > 0) System.arraycopy(mixedBlock, off, mixedBlock, 0, carry)
+                if (readEndMs - statWindowStartMs >= HEARTBEAT_MS) emitHeartbeat(readEndMs)
             } catch (e: InterruptedException) {
                 break
             } catch (e: Exception) {
@@ -251,7 +301,9 @@ class RecordingEngine(
                 val nowMs = System.currentTimeMillis()
                 if (nowMs - lastErrorPostMs > 15_000) {
                     lastErrorPostMs = nowMs
-                    RecordingController.postError("Recording problem: ${e.message ?: e::class.java.simpleName}")
+                    val message = e.message ?: e::class.java.simpleName
+                    RecordingController.postError("Recording problem: $message")
+                    events.log("error") { put("msg", message) }
                 }
                 try {
                     Thread.sleep(500)
@@ -293,27 +345,35 @@ class RecordingEngine(
             null
         }
 
-        override fun createWriter(sink: SegmentSink, startWallClockMs: Long) = try {
+        override fun createWriter(sink: SegmentSink, clipStartMs: Long) = try {
             SegmentWriters.create(
                 openDestination = { sink.openOutput() },
                 sampleRate = settings.sampleRate,
                 channels = 1,
                 bitrateBps = settings.bitrateBps,
                 minDurationMs = settings.minSegmentMs,
+                tags = clipTags(clipStartMs),
             )
         } catch (e: Exception) {
             Log.e(TAG, "cannot open encoder", e)
             null
         }
 
-        override fun onSegmentStored(sink: SegmentSink, durationMs: Long) {
+        override fun onSegmentStored(sink: SegmentSink, clipStartMs: Long, durationMs: Long, speechMs: Long) {
             try {
                 sink.finalize(durationMs)
             } catch (e: Exception) {
                 Log.w(TAG, "finalize failed", e)
             }
+            events.log("clip") {
+                put("file", SegmentNames.finalizedName(sink.baseName, durationMs))
+                put("start", clipStartMs)
+                put("dur_ms", durationMs)
+                put("speech_ms", speechMs)
+            }
             scope.launch {
                 store.cleanup(settings.maxStorageGb, settings.autoDeleteDays)
+                events.prune(settings.autoDeleteDays)
                 refreshStats()
             }
         }
@@ -328,15 +388,118 @@ class RecordingEngine(
     }
 
     private fun applyStorageLocation() {
+        val location = SegmentStore.Location(mode = settings.storageMode, customTreeUri = settings.customTreeUri)
+        events.location = location
         try {
-            store.setLocation(
-                SegmentStore.Location(
-                    mode = settings.storageMode,
-                    customTreeUri = settings.customTreeUri,
-                ),
-            )
+            store.setLocation(location)
         } catch (e: Exception) {
             Log.w(TAG, "cannot apply storage location", e)
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Event log + clip metadata
+    // ------------------------------------------------------------------
+
+    private fun detectorLabel(s: Settings): String = when (s.detector) {
+        Detector.SILERO -> "silero ${s.sileroThresholdPct}%"
+        Detector.ENERGY -> if (s.vadTracksFloor) {
+            val margin = if (s.sensitivity == EnergyVad.Sensitivity.CUSTOM) s.customThresholdDb else s.sensitivity.enterDb.toInt()
+            "energy floor+${margin}dB"
+        } else {
+            "energy ${s.absoluteThresholdDb}dB"
+        }
+    }
+
+    private fun appVersion(): String = try {
+        context.packageManager.getPackageInfo(context.packageName, 0).versionName.orEmpty()
+    } catch (_: Exception) {
+        ""
+    }
+
+    /** Opus comment tags that keep each clip self-describing without the event log. */
+    private fun clipTags(clipStartMs: Long): List<Pair<String, String>> = listOf(
+        "DATE" to DateTimeFormatter.ISO_OFFSET_DATE_TIME.format(
+            Instant.ofEpochMilli(clipStartMs).atZone(ZoneId.systemDefault()),
+        ),
+        "PENDANT_START_MS" to clipStartMs.toString(),
+        "PENDANT_MIC" to routeLabel,
+        "PENDANT_DETECTOR" to detectorLabel(settings),
+    )
+
+    private fun resetHeartbeat(nowMs: Long) {
+        statWindowStartMs = nowMs
+        statFrames = 0
+        statSpeechFrames = 0
+        statLevelSumDb = 0.0
+    }
+
+    /**
+     * Once a minute while listening: proof of life plus that minute's audio summary.
+     * audio_s counts analyzed audio; silenced and warm-up frames are excluded.
+     */
+    private fun emitHeartbeat(nowMs: Long) {
+        val frames = statFrames
+        events.log(EventLog.ALIVE) {
+            put("audio_s", frames * FRAME_MS / 1000)
+            if (frames > 0) {
+                put("level_db", (statLevelSumDb / frames).toFloat())
+                put("floor_db", vad.floorDb)
+                put("speech", statSpeechFrames.toFloat() / frames, decimals = 2)
+            }
+            if (silenced) put("silenced", true)
+        }
+        val lostMs = lostAudioMs()
+        if (lostMs > 0) events.log("gap") { put("ms", lostMs) }
+        resetHeartbeat(nowMs)
+    }
+
+    /**
+     * Audio dropped by buffer overruns since the last report, in ms. Compares the
+     * first source's capture position against what we read: the backlog between
+     * them only grows when frames were lost.
+     */
+    private fun lostAudioMs(): Long = synchronized(recs) {
+        val r = recs.firstOrNull() ?: return 0
+        val ts = AudioTimestamp()
+        if (r.record.getTimestamp(ts, AudioTimestamp.TIMEBASE_MONOTONIC) != AudioRecord.SUCCESS) return 0
+        val rate = settings.sampleRate
+        val position = ts.framePosition + (System.nanoTime() - ts.nanoTime) * rate / 1_000_000_000L
+        val backlog = position - firstSourceFramesRead
+        if (backlogBaselineFrames < 0) {
+            backlogBaselineFrames = backlog
+            return 0
+        }
+        val lost = backlog - backlogBaselineFrames - reportedLostFrames
+        val lostMs = lost * 1000 / rate
+        if (lostMs < GAP_REPORT_MS) return 0
+        reportedLostFrames += lost
+        lostMs
+    }
+
+    private fun registerRecordingCallback() {
+        try {
+            am.registerAudioRecordingCallback(recordingCallback, null)
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun unregisterRecordingCallback() {
+        try {
+            am.unregisterAudioRecordingCallback(recordingCallback)
+        } catch (_: Exception) {
+        }
+    }
+
+    private val recordingCallback = object : AudioManager.AudioRecordingCallback() {
+        override fun onRecordingConfigChanged(configs: MutableList<AudioRecordingConfiguration>) {
+            val sessions = synchronized(recs) { recs.map { it.record.audioSessionId } }
+            if (sessions.isEmpty()) return
+            val now = configs.any { it.clientAudioSessionId in sessions && it.isClientSilenced }
+            if (now == silenced) return
+            silenced = now
+            events.log(if (now) "silenced" else "unsilenced")
+            RecordingController.postSourceLabel(if (now) "Mic in use by another app" else routeLabel)
         }
     }
 
@@ -397,7 +560,22 @@ class RecordingEngine(
         closeSources()
         carry = 0
         if (paused.get()) return
+        val label = openPlannedRoute()
+        val open = synchronized(recs) { recs.isNotEmpty() }
+        routeLabel = label
+        RecordingController.postSourceLabel(label)
+        resetHeartbeat(System.currentTimeMillis())
+        if (loggedRoute != label to open) {
+            loggedRoute = label to open
+            events.log("mic") {
+                put("mic", label)
+                put("open", open)
+            }
+        }
+    }
 
+    /** Opens the sources for the current route plan; returns the label of what it chose. */
+    private fun openPlannedRoute(): String {
         val plan = planRoute()
         RecordingController.postSourceLabel(plan.label)
         if (plan.needsScoReset) sco.disable()
@@ -408,10 +586,9 @@ class RecordingEngine(
                 // SCO refused: fall back like AUTOMATIC would.
                 sco.disable()
                 val builtin = pickBuiltin()
-                if (builtin.isNotEmpty()) {
-                    openRecords(builtin, voiceFirst = !settings.phoneProcessing)
-                }
-                return
+                if (builtin.isEmpty()) return "No microphone available"
+                openRecords(builtin, voiceFirst = !settings.phoneProcessing)
+                return AudioRoutes.label(builtin[0])
             }
         }
 
@@ -420,6 +597,7 @@ class RecordingEngine(
             openRecords(plan.targets, voiceFirst)
         }
         // If nothing got opened (e.g. BLUETOOTH_ONLY with no headset) we simply idle.
+        return plan.label
     }
 
     private class RoutePlan(
@@ -547,7 +725,11 @@ class RecordingEngine(
                 }
             }
             recs.clear()
+            firstSourceFramesRead = 0
+            backlogBaselineFrames = -1
+            reportedLostFrames = 0
         }
+        silenced = false
         sco.disable()
     }
 
@@ -596,6 +778,7 @@ class RecordingEngine(
                 if (n == 0) return 0
                 count = minOf(count, n)
             }
+            firstSourceFramesRead += count
             val first = recs[0].buffer
             if (recs.size == 1) {
                 System.arraycopy(first, 0, mixedBlock, offset, count)
@@ -618,5 +801,8 @@ class RecordingEngine(
         private const val BLOCK_MS = BLOCK_FRAMES * FRAME_MS
         /** AudioRecord buffer capacity in blocks: slack for a late-scheduled capture thread. */
         private const val BUFFER_BLOCKS = 4
+        private const val HEARTBEAT_MS = 60_000L
+        /** Smaller backlog growth is drain jitter, not lost audio. */
+        private const val GAP_REPORT_MS = 200L
     }
 }

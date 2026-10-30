@@ -28,11 +28,14 @@ class Segmenter(
         /** Destination for the next segment (in the configured storage location). */
         fun nextSegmentSink(wallClockMs: Long): SegmentSink?
 
-        /** Creates the codec/muxer writer for this segment, or null to skip it. */
-        fun createWriter(sink: SegmentSink, startWallClockMs: Long): SegmentWriter?
+        /**
+         * Creates the codec/muxer writer for this segment, or null to skip it.
+         * [clipStartMs] is the wall-clock time of the clip's first sample, pre-roll included.
+         */
+        fun createWriter(sink: SegmentSink, clipStartMs: Long): SegmentWriter?
 
-        /** Duration is wall-time from segment start; writer is already finalized. */
-        fun onSegmentStored(sink: SegmentSink, durationMs: Long)
+        /** Duration is wall-time from segment start, [speechMs] the part judged as speech; writer is already finalized. */
+        fun onSegmentStored(sink: SegmentSink, clipStartMs: Long, durationMs: Long, speechMs: Long)
 
         /** Called when a segment was discarded (too short to be useful). */
         fun onSegmentDiscarded()
@@ -112,7 +115,8 @@ class Segmenter(
 
     private fun startSegment(wallClockMs: Long, firstSamples: ShortArray, firstCount: Int) {
         val sink = listener.nextSegmentSink(wallClockMs) ?: return
-        val w = listener.createWriter(sink, wallClockMs)
+        val clipStartMs = wallClockMs - (preroll.filled + firstCount) * 1000L / sampleRate
+        val w = listener.createWriter(sink, clipStartMs)
         if (w == null) {
             // Encoder failed before anything was written: make sure the pre-registered
             // destination (e.g. a MediaStore row) leaves nothing behind.
@@ -132,7 +136,7 @@ class Segmenter(
         }
         writer = w
         segmentSink = sink
-        segmentStartMs = wallClockMs
+        segmentStartMs = clipStartMs
         durationMs = (firstCount + preroll.capacitySamples) * 1000 / sampleRate
         speechMs = 0
         silenceMs = 0
@@ -148,7 +152,8 @@ class Segmenter(
             w.finish()
         } finally {
             if (store && w.samplesWritten > 0) {
-                listener.onSegmentStored(sink, maxOf(durationMs.toLong(), w.samplesWritten * 1000 / sampleRate))
+                val stored = maxOf(durationMs.toLong(), w.samplesWritten * 1000 / sampleRate)
+                listener.onSegmentStored(sink, segmentStartMs, stored, speechMs)
             } else {
                 // Nothing usable: remove the destination (file, MediaStore row or
                 // SAF document), including any partial bytes already written.
@@ -165,7 +170,8 @@ private class PrerollRing(val capacityMs: Int, val sampleRate: Int) {
     val capacitySamples = capacityMs * sampleRate / 1000
     private val buffer = ShortArray(capacitySamples)
     private var writeIdx = 0
-    private var filled = 0
+    var filled = 0
+        private set
 
     fun push(samples: ShortArray, count: Int) {
         if (count >= capacitySamples) {

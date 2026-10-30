@@ -41,14 +41,14 @@ class SegmenterTest {
         override fun nextSegmentSink(wallClockMs: Long): SegmentSink? =
             if (failFiles) null else FakeSink()
 
-        override fun createWriter(sink: SegmentSink, startWallClockMs: Long): SegmentWriter? {
+        override fun createWriter(sink: SegmentSink, clipStartMs: Long): SegmentWriter? {
             if (failFiles) return null
             val w = FakeWriter()
             writers.add(w)
             return w
         }
 
-        override fun onSegmentStored(sink: SegmentSink, durationMs: Long) {
+        override fun onSegmentStored(sink: SegmentSink, clipStartMs: Long, durationMs: Long, speechMs: Long) {
             stored.add(sink to durationMs)
         }
 
@@ -61,6 +61,7 @@ class SegmenterTest {
     }
 
     private class FakeSink : SegmentSink() {
+        override val baseName = "20261030_120000.opus"
         var finalized: Long? = null
         var discarded = 0
 

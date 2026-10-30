@@ -24,6 +24,29 @@ A 24/7 speech-capture app for Android. It listens like a wearable pendant, recor
 - **Quick pause.** Big in-app button, a Quick-Settings tile ("Pendant pause"), and buttons on the ongoing notification. Pausing frees the microphone immediately.
 - **Optional status-bar indicator.** Either a visible recording icon or a "quiet" notification with no icon (activity stays visible in the shade either way — Android requires an ongoing notification for background capture).
 - **Storage, location & care.** Clips land by default in your phone's public **Music/Pendant** folder (no permissions needed, visible in any music or file app so you can play or export clips anywhere). Segments are finished in an app-private staging area first and only *complete* clips — already carrying their `…_42s.opus` duration suffix — appear in the folder, which makes it safe to watch with a sync tool (Syncthing et al.): sync never sees partial or renamed audio. Settings → *Storage location* offers two alternatives: an **app-private folder** (invisible to other apps) and a **custom folder** picked with the system folder picker (the app keeps durable access and creates a `Pendant` subfolder inside it). If publishing a finished clip fails (full disk, provider error), it is rescued to the app-private listing instead of dropped. Switching the location applies to **new clips** (the recording in progress keeps its folder); the Recordings tab lists, plays, shares and deletes clips from every location in one place. Optional auto-delete after N days and a size cap (oldest first) run across all locations.
+- **Capture log.** A gap between clips can mean silence, a pause, another app holding the mic, or a dead service. A daily event log tells them apart (see [Capture log](#capture-log)), and every clip carries its own metadata tags.
+
+## Capture log
+
+One file per local day, one JSON object per line: `Documents/Pendant/events/2026-10-30.jsonl` (Music storage), `<custom folder>/Pendant/events/` (custom folder) or `Android/data/app.pendant/files/events/` (app-private, always the source of truth). Mirrors get state changes right away and heartbeats every 5 minutes, as appends.
+
+Every line has `t` (UTC epoch ms), `tz` (UTC offset at that instant), `up` (`elapsedRealtime` ms, exposes wall-clock jumps) and `e`:
+
+| `e` | Meaning | Extra fields |
+| --- | --- | --- |
+| `start` / `stop` | service started / stopped | `detector`, `rate`, `app` (start) |
+| `pause` / `resume` | user paused / resumed | |
+| `mic` | route opened or changed | `mic` (label), `open` (false: nothing to record from, e.g. waiting for Bluetooth) |
+| `silenced` / `unsilenced` | Android gives the mic to a call or voice-chat app and hands Pendant silence | |
+| `alive` | heartbeat, every minute while listening | `audio_s` (analyzed audio), `level_db`, `floor_db`, `speech` (share 0–1), `silenced` |
+| `gap` | audio lost to a buffer overrun | `ms` |
+| `clip` | clip stored | `file`, `start` (epoch ms, pre-roll included), `dur_ms`, `speech_ms` |
+| `config` | detector or sample rate changed | `detector`, `rate` |
+| `error` | capture error (throttled) | `msg` |
+
+Pendant was **listening** from `resume`, `unsilenced` or `mic` with `open: true` until the next `pause`, `stop`, `mic` with `open: false`, `silenced`, or, if none follows (killed, crashed, battery died), one minute after the last `alive`.
+
+Clips (Opus) carry comment tags: `DATE` (ISO 8601 with offset), `PENDANT_START_MS`, `PENDANT_MIC`, `PENDANT_DETECTOR`. The AAC fallback has no tags.
 
 ## Building
 
@@ -48,5 +71,6 @@ Requires JDK 17 and an Android SDK (platform 35).
 | `app/src/main/java/app/pendant/vad/` | energy VAD |
 | `app/src/main/java/app/pendant/segment/` | pre-roll / hangover segmentation |
 | `app/src/main/java/app/pendant/codec/` | Opus encoder, Ogg muxer, AAC fallback |
+| `app/src/main/java/app/pendant/events/` | capture log and its mirror next to the clips |
 | `app/src/main/java/app/pendant/ui/` | Compose UI |
 | `app/src/test/` | JVM tests (Ogg muxer validated against ffmpeg output) |
