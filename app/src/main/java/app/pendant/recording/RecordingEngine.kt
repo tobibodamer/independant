@@ -64,8 +64,11 @@ class RecordingEngine(
     /** Replaced detector still resident until the capture thread can close it. */
     @Volatile private var staleVad: Vad? = null
     private var segmenter: Segmenter? = null
+    /** One block of mixed capture; the VAD and segmenter walk it in [FRAME_MS] frames. */
+    private lateinit var mixedBlock: ShortArray
     private lateinit var mixed: ShortArray
     private var frameSamples = 0
+    private var blockSamples = 0
 
     /** Silero runs at 16 kHz internally; other rates only matter to the energy detector. */
     private fun newVad(s: Settings): Vad = when (s.detector) {
@@ -92,10 +95,7 @@ class RecordingEngine(
         recomputeFrameBuffers()
         registerDeviceCallback()
         acquireWakeLock()
-        thread = Thread({ loop() }, "pendant-capture").apply {
-            priority = Thread.MAX_PRIORITY - 1
-            start()
-        }
+        thread = Thread({ loop() }, "pendant-capture").apply { start() }
         RecordingController.postSourceLabel("Starting…")
         scope.launch { refreshStats() }
     }
@@ -165,7 +165,9 @@ class RecordingEngine(
     // ------------------------------------------------------------------
 
     private fun loop() {
-        Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO)
+        // Large blocks plus a multi-block AudioRecord buffer leave ample slack,
+        // so the thread needs no audio priority (which favors the big cores).
+        Process.setThreadPriority(Process.THREAD_PRIORITY_DEFAULT)
         var readFails = 0
         var meterTick = 0L
         var meterSmooth = Float.NaN
@@ -188,7 +190,10 @@ class RecordingEngine(
                     Thread.sleep(300)
                     continue
                 }
-                val n = readMixed()
+                // Reading ~0.5 s per call keeps wakeups rare; the live level meter
+                // needs per-frame updates, so it gets single frames while observed.
+                val metered = RecordingController.meterObserved
+                val n = readMixed(if (metered) frameSamples else blockSamples)
                 if (n < 0) {
                     if (++readFails >= 20) {
                         readFails = 0
@@ -200,24 +205,31 @@ class RecordingEngine(
                     continue
                 }
                 readFails = 0
-                if (mixed.all { it == 0.toShort() }) {
-                    // Mic warm-up: AudioRecord streams all-zero frames for ~1 s at
-                    // startup. Feeding them would seed the VAD noise floor at the
-                    // digital-silence level and pin speech=true until the floor
-                    // crawled back up (~1 min of "You're speaking").
-                    continue
+                val blockEndMs = System.currentTimeMillis()
+                var off = 0
+                while (off < n) {
+                    val count = minOf(frameSamples, n - off)
+                    System.arraycopy(mixedBlock, off, mixed, 0, count)
+                    off += count
+                    if (mixed.all { it == 0.toShort() }) {
+                        // Mic warm-up: AudioRecord streams all-zero frames for ~1 s at
+                        // startup. Feeding them would seed the VAD noise floor at the
+                        // digital-silence level and pin speech=true until the floor
+                        // crawled back up (~1 min of "You're speaking").
+                        continue
+                    }
+                    val speech = vad.process(mixed, count)
+                    if (metered && ++meterTick % 2L == 0L) {
+                        val e = vad.energyDb
+                        meterSmooth = if (meterSmooth.isNaN()) e
+                        else meterSmooth + (e - meterSmooth) * (if (e > meterSmooth) 0.45f else 0.12f)
+                        RecordingController.postMeter(
+                            RecordingController.MicMeter(meterSmooth, vad.enterThresholdDb, speech),
+                        )
+                    }
+                    val frameEndMs = blockEndMs - (n - off) * 1000L / settings.sampleRate
+                    segmenter?.feed(mixed, count, speech, frameEndMs)
                 }
-                val speech = vad.process(mixed, n)
-                meterTick++
-                if (meterTick % 2L == 0L) {
-                    val e = vad.energyDb
-                    meterSmooth = if (meterSmooth.isNaN()) e
-                    else meterSmooth + (e - meterSmooth) * (if (e > meterSmooth) 0.45f else 0.12f)
-                    RecordingController.postMeter(
-                        RecordingController.MicMeter(meterSmooth, vad.enterThresholdDb, speech),
-                    )
-                }
-                segmenter?.feed(mixed, n, speech, System.currentTimeMillis())
             } catch (e: InterruptedException) {
                 break
             } catch (e: Exception) {
@@ -242,7 +254,9 @@ class RecordingEngine(
 
     private fun recomputeFrameBuffers() {
         frameSamples = settings.sampleRate * FRAME_MS / 1000
+        blockSamples = frameSamples * BLOCK_FRAMES
         mixed = ShortArray(frameSamples)
+        mixedBlock = ShortArray(blockSamples)
         segmenter = createSegmenter()
         swapVad(newVad(settings))
     }
@@ -480,7 +494,7 @@ class RecordingEngine(
                         .setChannelMask(AudioFormat.CHANNEL_IN_MONO)
                         .build(),
                 )
-                .setBufferSizeInBytes(maxOf(minBuf * 2, frameSamples * 8))
+                .setBufferSizeInBytes(maxOf(minBuf * 2, blockSamples * 2 * BUFFER_BLOCKS))
                 .build()
         } catch (e: Throwable) {
             Log.w(TAG, "cannot create AudioRecord: ${e.message}")
@@ -498,7 +512,7 @@ class RecordingEngine(
             }
         }
         rec.startRecording()
-        return Rec(rec, ShortArray(frameSamples))
+        return Rec(rec, ShortArray(blockSamples))
     }
 
     /** Releases all AudioRecords and drops the SCO link. Thread-safe. */
@@ -543,13 +557,14 @@ class RecordingEngine(
     // Frame reading + mixing
     // ------------------------------------------------------------------
 
-    private fun readMixed(): Int {
+    /** Reads [samples] from every source into [mixedBlock]; returns the count mixed or -1. */
+    private fun readMixed(samples: Int): Int {
         synchronized(recs) {
             if (recs.isEmpty()) return -1
             var min = Int.MAX_VALUE
             for (r in recs) {
                 val n = try {
-                    r.record.read(r.buffer, 0, frameSamples)
+                    r.record.read(r.buffer, 0, samples)
                 } catch (e: Exception) {
                     return -1
                 }
@@ -558,12 +573,12 @@ class RecordingEngine(
             }
             val first = recs[0].buffer
             if (recs.size == 1) {
-                System.arraycopy(first, 0, mixed, 0, min)
+                System.arraycopy(first, 0, mixedBlock, 0, min)
             } else {
                 val second = recs[1].buffer
                 for (i in 0 until min) {
                     val sum = (first[i] + second[i]) / 2
-                    mixed[i] = sum.toShort()
+                    mixedBlock[i] = sum.toShort()
                 }
             }
             return min
@@ -573,5 +588,9 @@ class RecordingEngine(
     companion object {
         private const val TAG = "PendantEngine"
         const val FRAME_MS = 20
+        /** Frames per AudioRecord read while nobody watches the level meter (~0.5 s). */
+        private const val BLOCK_FRAMES = 25
+        /** AudioRecord buffer capacity in blocks: slack for a late-scheduled capture thread. */
+        private const val BUFFER_BLOCKS = 4
     }
 }
