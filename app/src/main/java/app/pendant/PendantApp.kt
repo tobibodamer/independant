@@ -8,6 +8,8 @@ class PendantApp : Application() {
     val store by lazy { app.pendant.storage.SegmentStore(this) }
     /** Shared clip listing feeding the Recordings tab (index snapshot + fresh re-lists). */
     val recordings by lazy { app.pendant.storage.RecordingsSource(this, store) }
+    /** Capture-log day reader for the Recordings timeline (LRU of parsed day files). */
+    val dayEvents by lazy { app.pendant.timeline.DayEvents(app.pendant.timeline.DayEvents.dir(this)) }
 
     override fun onCreate() {
         super.onCreate()
