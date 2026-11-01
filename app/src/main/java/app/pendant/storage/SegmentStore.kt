@@ -4,6 +4,8 @@ import android.content.ContentResolver
 import android.content.ContentUris
 import android.content.Context
 import android.net.Uri
+import android.os.Handler
+import android.os.Looper
 import android.provider.DocumentsContract
 import android.provider.MediaStore
 import android.util.Log
@@ -11,6 +13,7 @@ import app.pendant.codec.SegmentWriters
 import app.pendant.settings.StorageMode
 import java.io.File
 import java.io.FileOutputStream
+import java.util.concurrent.Executors
 
 /** One listing entry, backend-agnostic. */
 abstract class SegmentInfo(
@@ -103,8 +106,16 @@ private const val TAG = "PendantStorage"
  *
  * Writes always go to the currently configured [Location] (applied live: changing the
  * storage location takes effect for NEW segments; the open recording keeps writing
- * where it started). Listing, size reporting, delete and retention scans cover ALL
- * locations, so clips stay playable and managed after a mode switch.
+ * where it started). Deleting and retention cover ALL locations, so clips stay
+ * playable and managed after a mode switch.
+ *
+ * Listing ([list]) is a fast path over the always-scanned backends — app-private
+ * plus both MediaStore listings — because a user's custom SAF tree can hold
+ * thousands of documents and its enumeration dominates load time. Only the
+ * Recordings UI opts into that scan, via [list]'s asynchronous append callback.
+ * Byte totals are derived from that same fast listing, and the SAF retention
+ * pass runs solely while [StorageMode.CUSTOM] is active (MediaProvider already
+ * covers clips published to shared storage in the other modes).
  *
  * Modes:
  * - [StorageMode.DOCUMENTS] (default): segments are buffered app-privately and finished
@@ -134,6 +145,15 @@ class SegmentStore(private val context: Context) {
         private const val PENDING_SWEEP_MS = 60L * 60 * 1000
         private const val DAY_MS = 24L * 60 * 60 * 1000
         private const val GB_BYTES = 1024L * 1024 * 1024
+
+        // Selection strings hoisted: the listing backends run at service start and
+        // after every finalized clip and must not rebuild their text per call.
+        private val MUSIC_PATH_QUERY = "${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ?"
+        private val AUDIO_FILES_QUERY = "${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ?" +
+            " AND ${MediaStore.MediaColumns.MIME_TYPE} LIKE ?"
+        private val PENDING_ROWS_QUERY = "${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ?" +
+            " AND ${MediaStore.MediaColumns.IS_PENDING} = 1" +
+            " AND ${MediaStore.MediaColumns.DATE_MODIFIED} < ?"
 
         /** The app-private recordings directory (created on demand). */
         internal fun appPrivateDir(context: Context): File =
@@ -168,6 +188,17 @@ class SegmentStore(private val context: Context) {
     @Volatile private var location = Location()
 
     private val resolver: ContentResolver = context.contentResolver
+
+    /** Main-thread delivery for the asynchronous SAF append (see [list]). */
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    /**
+     * Serializes SAF tree scans away from the publish thread: a large-tree crawl
+     * runs for seconds and must not delay clip finalizations (see [list]).
+     */
+    private val safScanExecutor by lazy {
+        Executors.newSingleThreadExecutor { r -> Thread(r, "pendant-saf-scan").apply { isDaemon = true } }
+    }
 
     /** Human description of `<tree>/Pendant`, empty when not set or not queryable. */
     @Volatile var customDirSummary: String? = null
@@ -257,34 +288,62 @@ class SegmentStore(private val context: Context) {
     private fun containerMime(): String = SegmentWriters.containerMimeType()
 
     // ------------------------------------------------------------------
-    // Listing / totals / delete
+    // Listing / delete
     // ------------------------------------------------------------------
 
     /**
-     * Clips from every supported location, newest first. Touches ContentProviders,
-     * so run it off the main thread.
+     * Clips from the fast backends — app-private plus both MediaStore listings —
+     * newest first. Touches ContentProviders, so run it off the main thread.
+     *
+     * The custom tree's SAF `Pendant` folder is deliberately NOT enumerated here:
+     * a DocumentsProvider crawl of a large directory costs seconds and dominates
+     * load time. Callers that must surface those clips too (the Recordings UI)
+     * pass [onSafClips]; the scan then runs on a background thread and the
+     * callback later receives a complete, freshly merged snapshot on the main
+     * thread, which a Compose caller can assign straight into its list state.
+     * Stats and other callers pass nothing and get the fast listing only — SAF
+     * clips published under shared storage already surface via the MediaStore
+     * scan, so in practice only CUSTOM-tree sessions reveal anything extra.
      */
-    fun list(): List<SegmentInfo> {
+    fun list(onSafClips: ((List<SegmentInfo>) -> Unit)? = null): List<SegmentInfo> {
         recoverStagedClips()
         val files = appPrivateList()
         val media = mediaStoreList()
-        val saf = safList()
+        if (onSafClips != null && parseCustomTree() != null) {
+            // Deliver the appended snapshot, not just the SAF part: the merge needs
+            // the fresh fast listing anyway to shadow-link and dedupe SAF docs
+            // against their MediaStore twins.
+            safScanExecutor.execute {
+                val merged = try {
+                    mergeListings(appPrivateList(), mediaStoreList(), safList())
+                } catch (e: Exception) {
+                    Log.w(TAG, "SAF append failed", e)
+                    null
+                }
+                if (merged != null) mainHandler.post { onSafClips(merged) }
+            }
+        }
+        return mergeListings(files, media, emptyList())
+    }
+
+    /** Merges the backend listings into one sorted list, shadow-linking twins. */
+    private fun mergeListings(
+        files: List<SegmentInfo>,
+        media: List<SegmentInfo>,
+        saf: List<SegmentInfo>,
+    ): List<SegmentInfo> {
         // MediaProvider scans clips written via SAF, which surfaces the same file as
         // both a tree document and a media row. Prefer the media row (it carries the
         // DURATION column) and keep the document for deletion.
         val safByName = saf.associateBy { it.name }
+        val mediaNames = media.mapTo(HashSet()) { it.name }
         val out = ArrayList<SegmentInfo>(files.size + media.size + saf.size)
         out.addAll(files)
         for (m in media) m.shadowBackend = safByName[m.name]
-        for (s in saf) if (media.none { it.name == s.name }) out.add(s)
+        for (s in saf) if (s.name !in mediaNames) out.add(s)
         out.addAll(media)
         return out.sortedByDescending { it.lastModifiedMs }
     }
-
-    fun totalBytes(): Long =
-        appPrivateList().sumOf { it.sizeBytes } +
-            mediaStoreQuery().sumOf { it.sizeBytes } +
-            safDocs().sumOf { it.sizeBytes }
 
     fun delete(info: SegmentInfo) {
         try {
@@ -347,13 +406,9 @@ class SegmentStore(private val context: Context) {
      * Android, exactly what we want.
      */
     private fun mediaStoreQuery(): List<MediaRow> = try {
-        queryMediaRows(
-            mediaCollection,
-            "${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ?",
-            arrayOf("$MUSIC_RELATIVE_PATH/%"),
-        ) + queryMediaRows(
+        queryMediaRows(mediaCollection, MUSIC_PATH_QUERY, arrayOf("$MUSIC_RELATIVE_PATH/%")) + queryMediaRows(
             filesCollection,
-            "${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ? AND ${MediaStore.MediaColumns.MIME_TYPE} LIKE ?",
+            AUDIO_FILES_QUERY,
             // audio/… kept clips only: the events log (.jsonl, octet-stream) beside them
             // is not a clip.
             arrayOf("$DOCUMENTS_RELATIVE_PATH/%", "audio/%"),
@@ -489,7 +544,10 @@ class SegmentStore(private val context: Context) {
         var deleted = 0
         deleted += cleanupAppPrivate(cap, ageCutoff)
         deleted += cleanupMediaStore(cap, ageCutoff)
-        deleted += cleanupSaf(cap, ageCutoff)
+        // SAF scan only while CUSTOM: clips of the other modes live in shared
+        // storage and are already covered by the MediaStore pass above, so a
+        // foreign-tree crawl here would buy nothing while costing seconds.
+        if (location.mode == StorageMode.CUSTOM) deleted += cleanupSaf(cap, ageCutoff)
         deleted += mediaStorePendingSweep()
         return deleted
     }
@@ -574,14 +632,11 @@ class SegmentStore(private val context: Context) {
     }
 
     private fun sweepPending(collection: Uri, relativePath: String): Int {
-        val selection = "${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ?" +
-            " AND ${MediaStore.MediaColumns.IS_PENDING} = 1" +
-            " AND ${MediaStore.MediaColumns.DATE_MODIFIED} < ?"
         val cutoffSec = (System.currentTimeMillis() - PENDING_SWEEP_MS) / 1000
         return resolver.query(
             collection,
             arrayOf(MediaStore.MediaColumns._ID),
-            selection,
+            PENDING_ROWS_QUERY,
             arrayOf("$relativePath/%", cutoffSec.toString()),
             null,
         )?.use { c ->

@@ -504,6 +504,9 @@ class RecordingEngine(
     }
 
     private fun refreshStats() {
+        // Fast path only: this runs at service start and after every finalized
+        // clip, where a SAF-tree crawl (which list() only performs for the
+        // Recordings UI append) or a separate bytes scan must not appear.
         val segments = store.list()
         val startOfDay = DayKey.startOfDayMs(System.currentTimeMillis())
         val today = segments.filter { it.lastModifiedMs >= startOfDay }
@@ -511,7 +514,9 @@ class RecordingEngine(
             RecordingController.Stats(
                 segmentsToday = today.size.toLong(),
                 secondsToday = today.sumOf { it.durationMs } / 1000,
-                totalBytes = store.totalBytes(),
+                // Fast-backend bytes; clips living only in a custom SAF tree are
+                // left out rather than re-enumerating the tree for an exact total.
+                totalBytes = segments.sumOf { it.sizeBytes },
                 voiceActive = RecordingController.stats.value.voiceActive,
                 sourceLabel = RecordingController.stats.value.sourceLabel,
             ),

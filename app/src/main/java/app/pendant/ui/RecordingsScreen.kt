@@ -57,7 +57,12 @@ fun RecordingsScreen(app: PendantApp) {
     val player = remember { MediaPlayer() }
 
     suspend fun reload() {
-        recordings = withContext(Dispatchers.IO) { store.list() }
+        // Fast backends first so the list paints immediately; the custom tree's
+        // SAF clips append asynchronously when the background scan delivers a
+        // merged snapshot on the main thread.
+        recordings = withContext(Dispatchers.IO) {
+            store.list(onSafClips = { recordings = it })
+        }
     }
 
     LaunchedEffect(Unit) {
