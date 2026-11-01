@@ -78,7 +78,7 @@ data class Settings(
     val maxSegmentSec: Long = 900,
     val statusIndicator: StatusBarIndicator = StatusBarIndicator.SHOW_ICON,
     val phoneProcessing: Boolean = false,
-    val keepCpuAwake: Boolean = true,
+    val keepCpuAwake: Boolean = false,
     val startOnBoot: Boolean = false,
     val autoDeleteDays: Int = 0,
     val maxStorageGb: Int = 0,
@@ -144,7 +144,7 @@ class PendantSettings(private val context: Context) {
             statusIndicator = p[Keys.statusIndicator]?.let { runCatching { StatusBarIndicator.valueOf(it) }.getOrNull() }
                 ?: StatusBarIndicator.SHOW_ICON,
             phoneProcessing = (p[Keys.phoneProcessing] ?: 0) == 1,
-            keepCpuAwake = (p[Keys.keepCpuAwake] ?: 1) == 1,
+            keepCpuAwake = (p[Keys.keepCpuAwake] ?: 0) == 1,
             startOnBoot = (p[Keys.startOnBoot] ?: 0) == 1,
             autoDeleteDays = p[Keys.autoDeleteDays] ?: 0,
             maxStorageGb = p[Keys.maxStorageGb] ?: 0,

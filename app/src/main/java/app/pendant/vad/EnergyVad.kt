@@ -74,15 +74,6 @@ class EnergyVad(
             }
             else -> noiseFloorDb = min(noiseFloorDb + FLOOR_RISE_PER_FRAME, energy)
         }
-        if (framesSeen % DIAG_FRAME_INTERVAL == 1) {
-            // println (not android.util.Log) keeps this JVM-testable; it surfaces in
-            // logcat as "System.out" anyway. Used to plot level vs. thresholds.
-            println(
-                "PendantEngine: vad energy=%.1f floor=%.1f enter=%.1f exit=%.1f speech=%b"
-                    .format(energy, noiseFloorDb, noiseFloorDb + enterDb, noiseFloorDb + exitDb, speech),
-            )
-        }
-
         // Fixed mode judges against one absolute level (-enterAbs-); floor-relative
         // mode judges against the adaptive floor + margin. The "confirm" pre-window
         // is roughly proportional in both cases (~70% of the margin).
@@ -174,7 +165,5 @@ class EnergyVad(
         const val FLOOR_RISE_PER_FRAME = 0.05f
         /** ~25 dB/s while priming, so cold start converges within a second. */
         const val PRIME_RISE_PER_FRAME = 0.5f
-        /** Diagnostic cadence: one line every 25 frames (~0.5 s) for level plots. */
-        const val DIAG_FRAME_INTERVAL = 25
     }
 }

@@ -27,6 +27,10 @@ object RecordingController {
     private val _meter = MutableStateFlow<MicMeter?>(null)
     val meter: StateFlow<MicMeter?> = _meter
 
+    /** True while a screen collects [meter]; the engine only produces it then. */
+    val meterObserved: Boolean
+        get() = _meter.subscriptionCount.value > 0
+
     fun postMeter(m: MicMeter?) {
         _meter.value = m
     }

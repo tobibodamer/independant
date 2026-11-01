@@ -103,7 +103,7 @@ class SileroVad(
         val bytes = context.assets.open(MODEL_ASSET).use { it.readBytes() }
         // Resolve I/O names once (matched defensively so a rebuilt model
         // variant can't wedge the meter).
-        val namer = env.createSession(bytes, OrtSession.SessionOptions())
+        val namer = env.createSession(bytes, sessionOptions(noOpt = false))
         val ins = namer.inputNames.toList()
         val outs = namer.outputNames.toList()
         inputName = ins.first { it.contains("input", ignoreCase = true) }
@@ -119,9 +119,7 @@ class SileroVad(
         // silent window and keep whichever combination the device accepts.
         var won = false
         outer@ for (opt in 0..1) {
-            val opts = OrtSession.SessionOptions()
-            if (opt == 1) opts.setOptimizationLevel(OrtSession.SessionOptions.OptLevel.NO_OPT)
-            val probe = env.createSession(bytes, opts)
+            val probe = env.createSession(bytes, sessionOptions(noOpt = opt == 1))
             try {
                 for (s2 in 0..3) {
                     try {
@@ -143,9 +141,7 @@ class SileroVad(
                 }
             }
         }
-        val finalOpts = OrtSession.SessionOptions()
-        if (optStrategy == 1) finalOpts.setOptimizationLevel(OrtSession.SessionOptions.OptLevel.NO_OPT)
-        session = env.createSession(bytes, finalOpts)
+        session = env.createSession(bytes, sessionOptions(noOpt = optStrategy == 1))
         // Sanity: a loud tone must score differently from silence. With a
         // dead input binding (the heap-buffer bug this runtime has shown
         // before), every window scores the silence value — surface that here
@@ -171,6 +167,16 @@ class SileroVad(
             "PendantEngine: silero vad ready (net ${bytes.size / 1024} KB, thr=%.2f, sr=%d, opt=%d, won=%b)"
                 .format(threshold, srStrategy, optStrategy, won),
         )
+    }
+
+    /**
+     * Single-threaded: one ~1 ms inference per 32 ms window gains nothing from
+     * ORT's default per-core pool, whose idle workers spin and burn several cores.
+     */
+    private fun sessionOptions(noOpt: Boolean) = OrtSession.SessionOptions().apply {
+        setIntraOpNumThreads(1)
+        setInterOpNumThreads(1)
+        if (noOpt) setOptimizationLevel(OrtSession.SessionOptions.OptLevel.NO_OPT)
     }
 
     // Frame processing ----------------------------------------------------

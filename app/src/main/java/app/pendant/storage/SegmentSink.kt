@@ -18,6 +18,9 @@ import java.util.concurrent.Executors
 
 /** Destination of one segment: hands bytes to the codec writer, then finalizes or discards. */
 abstract class SegmentSink {
+    /** File name the segment was created under, before the duration suffix. */
+    abstract val baseName: String
+
     /** Where the writer should send its encoded bytes, or null when storage is unavailable. */
     abstract fun openOutput(): SegmentDestination?
 
@@ -31,7 +34,7 @@ abstract class SegmentSink {
 private const val TAG = "PendantStorage"
 
 /** Plain file destination used by the app-private path. Pure java.io, JVM-testable. */
-class FileSegmentSink(private val dir: File, baseName: String) : SegmentSink() {
+class FileSegmentSink(private val dir: File, override val baseName: String) : SegmentSink() {
 
     val file = File(dir, baseName)
 
@@ -73,12 +76,11 @@ class FileSegmentSink(private val dir: File, baseName: String) : SegmentSink() {
 class PublishingSegmentSink(
     context: Context,
     mime: String,
-    baseName: String,
+    override val baseName: String,
 ) : SegmentSink() {
 
     private val resolver = context.contentResolver
     private val mime = mime
-    private val baseName = baseName
     /** Segment under construction; hidden from every clip listing until published. */
     private val staged = File(SegmentStore.stagingDir(context), baseName)
     /** Where the rescue path puts an unpublished finished clip. */
@@ -208,7 +210,7 @@ class SafSegmentSink(
     context: Context,
     treeUriString: String,
     mime: String,
-    baseName: String,
+    override val baseName: String,
     dirName: String = SegmentStore.SAF_DIR_NAME,
 ) : SegmentSink() {
 
@@ -216,7 +218,6 @@ class SafSegmentSink(
     private val treeUri: Uri
     private val dirUri: Uri
     private val docUri: Uri
-    private val baseName = baseName
     private val mime = mime
     /** The document's current URI; renameDocument returns a new one. */
     private var renamedUri: Uri? = null

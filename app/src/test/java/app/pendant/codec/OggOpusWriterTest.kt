@@ -95,4 +95,23 @@ class OggOpusWriterTest {
         assertEquals(600, audio[0].size)
         assertEquals(1275, audio[1].size)
     }
+
+    @Test
+    fun `user comments land in the OpusTags header`() {
+        val out = ByteArrayOutputStream()
+        val w = OggOpusWriter(out)
+        w.writeHeaders(16000, 1, 312, tags = listOf("DATE" to "2026-10-30T05:54:32.123+01:00", "PENDANT_MIC" to "Bluetooth: Bügel"))
+        w.close()
+        val tags = TestOggReader.readAll(out.toByteArray())[1].packets[0]
+        fun u32(off: Int) = (0..3).sumOf { (tags[off + it].toInt() and 0xFF) shl (8 * it) }
+        var pos = 12 + u32(8)
+        assertEquals(2, u32(pos))
+        pos += 4
+        val comments = List(2) {
+            val len = u32(pos)
+            String(tags, pos + 4, len, Charsets.UTF_8).also { pos += 4 + len }
+        }
+        assertEquals(listOf("DATE=2026-10-30T05:54:32.123+01:00", "PENDANT_MIC=Bluetooth: Bügel"), comments)
+        assertEquals(tags.size, pos)
+    }
 }

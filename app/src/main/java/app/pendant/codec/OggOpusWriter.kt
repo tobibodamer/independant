@@ -22,10 +22,17 @@ class OggOpusWriter(private val out: OutputStream) {
 
     private var closed = false
 
-    fun writeHeaders(sampleRate: Int, channels: Int, preskip: Int, vendor: String = OPUS_TAGS_VENDOR) {
+    /** @param tags Vorbis-style user comments (`KEY=value`, UTF-8) for the OpusTags header. */
+    fun writeHeaders(
+        sampleRate: Int,
+        channels: Int,
+        preskip: Int,
+        vendor: String = OPUS_TAGS_VENDOR,
+        tags: List<Pair<String, String>> = emptyList(),
+    ) {
         check(!headersWritten) { "headers already written" }
         writePage(listOf(makeOpusHead(sampleRate, channels, preskip)), granulePos = 0, bos = true, eos = false)
-        writePage(listOf(makeOpusTags(vendor)), granulePos = 0, bos = false, eos = false)
+        writePage(listOf(makeOpusTags(vendor, tags)), granulePos = 0, bos = false, eos = false)
         this.granule = preskip.toLong()
         headersWritten = true
     }
@@ -90,13 +97,21 @@ class OggOpusWriter(private val out: OutputStream) {
         return b
     }
 
-    private fun makeOpusTags(vendor: String): ByteArray {
+    private fun makeOpusTags(vendor: String, tags: List<Pair<String, String>>): ByteArray {
         val v = vendor.toByteArray(Charsets.US_ASCII)
-        val b = ByteArray(8 + 4 + v.size + 4)
+        val comments = tags.map { (k, value) -> "$k=$value".toByteArray(Charsets.UTF_8) }
+        val b = ByteArray(8 + 4 + v.size + 4 + comments.sumOf { 4 + it.size })
         "OpusTags".toByteArray(Charsets.US_ASCII).copyInto(b, 0)
         putU32Le(b, 8, v.size)
         v.copyInto(b, 12)
-        putU32Le(b, 12 + v.size, 0) // zero user comments
+        var pos = 12 + v.size
+        putU32Le(b, pos, comments.size)
+        pos += 4
+        for (c in comments) {
+            putU32Le(b, pos, c.size)
+            c.copyInto(b, pos + 4)
+            pos += 4 + c.size
+        }
         return b
     }
 

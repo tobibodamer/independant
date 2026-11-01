@@ -21,6 +21,7 @@ object SegmentWriters {
      * (preserving the no-file-for-short-segments behavior). The AAC fallback needs its
      * destination up front (MediaMuxer), so [openDestination] is invoked immediately;
      * if that fails, null is returned and the caller should discard the segment.
+     * [tags] land in the Opus comment header; MediaMuxer offers no equivalent for AAC.
      */
     fun create(
         openDestination: SegmentDestination.Opener,
@@ -28,9 +29,10 @@ object SegmentWriters {
         channels: Int,
         bitrateBps: Int,
         minDurationMs: Long,
+        tags: List<Pair<String, String>> = emptyList(),
     ): SegmentWriter? = try {
         when (format) {
-            Format.OPUS -> OpusSegmentWriter(openDestination, sampleRate, channels, bitrateBps, minDurationMs)
+            Format.OPUS -> OpusSegmentWriter(openDestination, sampleRate, channels, bitrateBps, minDurationMs, tags)
             Format.AAC -> {
                 val dest = openDestination.open() ?: return null
                 AacSegmentWriter(dest, sampleRate, bitrateBps, minDurationMs)

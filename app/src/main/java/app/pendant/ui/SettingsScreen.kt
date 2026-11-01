@@ -36,6 +36,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -520,7 +521,8 @@ private fun MicLevelMeter(
             PackageManager.PERMISSION_GRANTED
     }
     val engineState by RecordingController.state.collectAsState()
-    val engineMeter by RecordingController.meter.collectAsState()
+    // Lifecycle-bound so the engine stops producing meter values once the app leaves the screen.
+    val engineMeter by RecordingController.meter.collectAsStateWithLifecycle()
     val engineIdle = engineState == RecordingController.State.IDLE
     val silero = detector == Detector.SILERO
     val activeVal = when {

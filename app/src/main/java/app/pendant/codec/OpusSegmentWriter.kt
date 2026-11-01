@@ -21,6 +21,7 @@ class OpusSegmentWriter(
     channels: Int,
     bitrateBps: Int,
     private val minDurationMs: Long,
+    private val tags: List<Pair<String, String>> = emptyList(),
 ) : SegmentWriter {
 
     private val encoder = OpusEncoder(sampleRate, channels, bitrateBps)
@@ -80,7 +81,7 @@ class OpusSegmentWriter(
         this.pfd = pfd
         val om = OggOpusWriter(buffered)
         muxer = om
-        om.writeHeaders(sampleRate, 1, encoder.preskip)
+        om.writeHeaders(sampleRate, 1, encoder.preskip, tags = tags)
         for ((p, d) in held) om.writePacket(p, d)
         held.clear()
     }
