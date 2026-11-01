@@ -50,6 +50,7 @@ class RecordingEngine(
     private val context: Context,
     private var settings: Settings,
     private val store: SegmentStore,
+    private val recordings: app.pendant.storage.RecordingsSource,
 ) {
     private val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
     private val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
@@ -131,7 +132,10 @@ class RecordingEngine(
         acquireWakeLock()
         thread = Thread({ loop() }, "pendant-capture").apply { start() }
         RecordingController.postSourceLabel("Starting…")
-        scope.launch { refreshStats() }
+        scope.launch {
+            recordings.refresh() // staged-clip recovery can move clips without MediaStore churn
+            refreshStats()
+        }
     }
 
     fun pause() {
@@ -374,6 +378,10 @@ class RecordingEngine(
             scope.launch {
                 store.cleanup(settings.maxStorageGb, settings.autoDeleteDays)
                 events.prune(settings.autoDeleteDays)
+                // Retention and the new clip change the listing even without
+                // MediaStore (app-private mode); the Recordings flow rides the
+                // same trigger instead of its own scheduled rescan.
+                recordings.refresh()
                 refreshStats()
             }
         }

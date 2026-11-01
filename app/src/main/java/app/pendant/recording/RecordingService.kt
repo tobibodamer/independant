@@ -115,7 +115,7 @@ class RecordingService : Service() {
             stopSelf()
             return
         }
-        engine = RecordingEngine(this, s, app.store)
+        engine = RecordingEngine(this, s, app.store, app.recordings)
         engine!!.start()
         RecordingController.post(RecordingController.State.RECORDING)
     }

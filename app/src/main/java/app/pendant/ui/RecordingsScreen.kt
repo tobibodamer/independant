@@ -17,6 +17,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -26,11 +27,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -40,9 +40,6 @@ import androidx.core.content.FileProvider
 import app.pendant.PendantApp
 import app.pendant.storage.SegmentInfo
 import app.pendant.storage.SegmentStore
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -51,23 +48,12 @@ import java.util.Locale
 fun RecordingsScreen(app: PendantApp) {
     val context = LocalContext.current
     val store = app.store
-    val scope = rememberCoroutineScope()
-    var recordings by remember { mutableStateOf<List<SegmentInfo>>(emptyList()) }
+    // Shared source of truth: painting straight from the flow costs zero provider
+    // calls, even on a cold start (the persisted index feeds it). Refreshes come
+    // from app start, clip finalize/delete, MediaStore churn and the refresh button.
+    val recordings by app.recordings.clips.collectAsState()
     var playingKey by remember { mutableStateOf<String?>(null) }
     val player = remember { MediaPlayer() }
-
-    suspend fun reload() {
-        // Fast backends first so the list paints immediately; the custom tree's
-        // SAF clips append asynchronously when the background scan delivers a
-        // merged snapshot on the main thread.
-        recordings = withContext(Dispatchers.IO) {
-            store.list(onSafClips = { recordings = it })
-        }
-    }
-
-    LaunchedEffect(Unit) {
-        reload()
-    }
 
     fun stopPlayback() {
         if (playingKey != null) {
@@ -89,12 +75,17 @@ fun RecordingsScreen(app: PendantApp) {
     }
 
     Column(Modifier.fillMaxSize().padding(horizontal = 20.dp)) {
-        Text(
-            "${recordings.size} clips · ${formatBytes(recordings.sumOf { it.sizeBytes })}",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(vertical = 10.dp),
-        )
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                "${recordings.size} clips · ${formatBytes(recordings.sumOf { it.sizeBytes })}",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.weight(1f).padding(vertical = 10.dp),
+            )
+            IconButton(onClick = { app.recordings.refresh() }) {
+                Icon(Icons.Filled.Refresh, contentDescription = "Refresh")
+            }
+        }
         if (recordings.isEmpty()) {
             Text(
                 "Nothing here yet. Clips appear as you speak.",
@@ -148,7 +139,7 @@ fun RecordingsScreen(app: PendantApp) {
                         IconButton(onClick = {
                             stopPlayback()
                             store.delete(seg)
-                            scope.launch { reload() }
+                            app.recordings.refresh()
                         }) {
                             Icon(
                                 Icons.Filled.Delete,

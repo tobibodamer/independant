@@ -386,9 +386,10 @@ class SegmentStore(private val context: Context) {
         val lastModifiedMs: Long,
     )
 
-    private val mediaCollection: Uri = MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+    // internal: RecordingsSource registers its listing observers on both collections.
+    internal val mediaCollection: Uri = MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
 
-    private val filesCollection: Uri = MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+    internal val filesCollection: Uri = MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
 
     private val mediaProjection = arrayOf(
         MediaStore.MediaColumns._ID,
