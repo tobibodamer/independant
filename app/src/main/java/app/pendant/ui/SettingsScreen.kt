@@ -306,12 +306,14 @@ fun SettingsScreen(app: PendantApp) {
                 value = settings.storageMode.name,
                 options = StorageMode.entries.map { it.name },
                 labels = mapOf(
-                    "MUSIC" to "Music folder (default)",
+                    "DOCUMENTS" to "Documents folder (default)",
+                    "MUSIC" to "Music folder",
                     "APP_PRIVATE" to "App-private folder",
                     "CUSTOM" to "Custom folder (SAF)",
                 ),
                 onSelected = { opt ->
                     when (opt) {
+                        "DOCUMENTS" -> scope.launch { app.settings.setStorageMode(StorageMode.DOCUMENTS) }
                         "MUSIC" -> scope.launch { app.settings.setStorageMode(StorageMode.MUSIC) }
                         "APP_PRIVATE" -> scope.launch { app.settings.setStorageMode(StorageMode.APP_PRIVATE) }
                         "CUSTOM" ->
@@ -325,6 +327,7 @@ fun SettingsScreen(app: PendantApp) {
             )
             Note(
                 when (settings.storageMode) {
+                    StorageMode.DOCUMENTS -> "Public Documents/Pendant — clips and capture log in one tree"
                     StorageMode.MUSIC -> "Public Music/Pendant, visible in any file app"
                     StorageMode.APP_PRIVATE -> "App-private storage"
                     StorageMode.CUSTOM -> "Custom picked folder"
@@ -347,6 +350,7 @@ fun SettingsScreen(app: PendantApp) {
             }
             Note(
                 "Path: " + when (settings.storageMode) {
+                    StorageMode.DOCUMENTS -> "/storage/emulated/0/Documents/Pendant"
                     StorageMode.MUSIC -> "/storage/emulated/0/Music/Pendant"
                     StorageMode.APP_PRIVATE -> app.store.appPrivatePath()
                     StorageMode.CUSTOM -> customDirDisplay ?: "not chosen"

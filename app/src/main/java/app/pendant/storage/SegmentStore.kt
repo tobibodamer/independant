@@ -107,11 +107,16 @@ private const val TAG = "PendantStorage"
  * locations, so clips stay playable and managed after a mode switch.
  *
  * Modes:
- * - [StorageMode.MUSIC] (default): segments are buffered app-privately and finished
- *   clips are published to MediaStore rows under [MUSIC_RELATIVE_PATH] at finalize
- *   ([PublishingSegmentSink]); the public folder only ever gains whole files, which
- *   makes it safe to watch with a sync engine (Syncthing et al.). Duration suffix
- *   comes with the final name; the DURATION column is written as well.
+ * - [StorageMode.DOCUMENTS] (default): segments are buffered app-privately and finished
+ *   clips are published to MediaStore file rows under [DOCUMENTS_RELATIVE_PATH] at
+ *   finalize ([PublishingSegmentSink]); same staging discipline as MUSIC. The capture
+ *   log mirrors beside the clips into `Documents/Pendant/events` ([EventMirror]),
+ *   keeping clips and metadata in one synced tree.
+ * - [StorageMode.MUSIC]: same publish-to-MediaStore flow into `Music/Pendant`; keeps
+ *   clips listed by music players, but the capture log cannot live there (Music only
+ *   admits audio) and mirrors to `Documents/Pendant/events` instead. On Android 10
+ *   (minSdk 29) MediaStore refuses arbitrary-file contributions to Documents/, so a
+ *   DOCUMENTS-mode publish fails and its rescue path parks the clip app-privately.
  * - [StorageMode.APP_PRIVATE]: classic files in Android/data/…/files/recordings.
  * - [StorageMode.CUSTOM]: SAF tree (usually Music) picked by the user, written to
  *   `<tree>/Pendant`; those files keep the `_NNs` duration-suffix rename.
@@ -121,6 +126,8 @@ class SegmentStore(private val context: Context) {
     companion object {
         /** Public Music subfolder that MediaStore-backed recordings land in. */
         const val MUSIC_RELATIVE_PATH = "Music/Pendant"
+        /** Public Documents subfolder — the one-tree home for clips and capture log. */
+        const val DOCUMENTS_RELATIVE_PATH = "Documents/Pendant"
         /** Subfolder inside a user-picked SAF tree. */
         const val SAF_DIR_NAME = "Pendant"
         /** Rows never finalized (app died mid-segment) are swept after this age. */
@@ -154,7 +161,7 @@ class SegmentStore(private val context: Context) {
     }
 
     data class Location(
-        val mode: StorageMode = StorageMode.MUSIC,
+        val mode: StorageMode = StorageMode.DOCUMENTS,
         val customTreeUri: String = "",
     )
 
@@ -199,6 +206,7 @@ class SegmentStore(private val context: Context) {
 
     /** One-line description of the effective path of the configured location. */
     fun describeLocation(): String = when (location.mode) {
+        StorageMode.DOCUMENTS -> "/storage/emulated/0/$DOCUMENTS_RELATIVE_PATH (MediaStore)"
         StorageMode.MUSIC -> "/storage/emulated/0/$MUSIC_RELATIVE_PATH (MediaStore)"
         StorageMode.APP_PRIVATE -> appPrivateDir().absolutePath
         StorageMode.CUSTOM -> customDirSummary ?: "Custom folder: not chosen"
@@ -232,7 +240,8 @@ class SegmentStore(private val context: Context) {
         val base = SegmentNames.baseName(ext(), startWallClockMs)
         return when (location.mode) {
             StorageMode.APP_PRIVATE -> FileSegmentSink(appPrivateDir(), base)
-            StorageMode.MUSIC -> PublishingSegmentSink(context, containerMime(), base)
+            StorageMode.DOCUMENTS -> PublishingSegmentSink(context, containerMime(), base, DOCUMENTS_RELATIVE_PATH)
+            StorageMode.MUSIC -> PublishingSegmentSink(context, containerMime(), base, MUSIC_RELATIVE_PATH)
             StorageMode.CUSTOM -> SafSegmentSink(context, location.customTreeUri, containerMime(), base)
         }
     }
@@ -310,7 +319,8 @@ class SegmentStore(private val context: Context) {
             ?: emptyList()
 
     private class MediaRow(
-        val id: Long,
+        /** Fully built row URI (built on the same collection the row came from). */
+        val rowUri: Uri,
         val name: String,
         val sizeBytes: Long,
         val durationMs: Long,
@@ -319,36 +329,52 @@ class SegmentStore(private val context: Context) {
 
     private val mediaCollection: Uri = MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
 
+    private val filesCollection: Uri = MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+
     private val mediaProjection = arrayOf(
         MediaStore.MediaColumns._ID,
         MediaStore.MediaColumns.DISPLAY_NAME,
         MediaStore.MediaColumns.SIZE,
         MediaStore.MediaColumns.DATE_MODIFIED,
-        MediaStore.Audio.AudioColumns.DURATION,
+        MediaStore.MediaColumns.DURATION,
     )
 
     /**
-     * Own ready audio rows under Music/Pendant. Without READ permissions the provider
-     * returns only our app's contributions on modern Android, exactly what we want.
+     * Own ready audio rows under [MUSIC_RELATIVE_PATH] and [DOCUMENTS_RELATIVE_PATH]
+     * (the latter via the Files collection: Android only admits audio under Music/,
+     * so DOCUMENTS clips are file rows that music players never list). Without READ
+     * permissions the provider returns only our app's contributions on modern
+     * Android, exactly what we want.
      */
     private fun mediaStoreQuery(): List<MediaRow> = try {
-        resolver.query(
+        queryMediaRows(
             mediaCollection,
-            mediaProjection,
             "${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ?",
             arrayOf("$MUSIC_RELATIVE_PATH/%"),
-            null,
-        )?.use { c ->
+        ) + queryMediaRows(
+            filesCollection,
+            "${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ? AND ${MediaStore.MediaColumns.MIME_TYPE} LIKE ?",
+            // audio/… kept clips only: the events log (.jsonl, octet-stream) beside them
+            // is not a clip.
+            arrayOf("$DOCUMENTS_RELATIVE_PATH/%", "audio/%"),
+        )
+    } catch (e: Exception) {
+        Log.w(TAG, "MediaStore scan failed", e)
+        emptyList()
+    }
+
+    private fun queryMediaRows(collection: Uri, selection: String, args: Array<String>): List<MediaRow> =
+        resolver.query(collection, mediaProjection, selection, args, null)?.use { c ->
             val idI = c.getColumnIndexOrThrow(MediaStore.MediaColumns._ID)
             val nameI = c.getColumnIndexOrThrow(MediaStore.MediaColumns.DISPLAY_NAME)
             val sizeI = c.getColumnIndexOrThrow(MediaStore.MediaColumns.SIZE)
             val dateI = c.getColumnIndexOrThrow(MediaStore.MediaColumns.DATE_MODIFIED)
-            val durI = c.getColumnIndexOrThrow(MediaStore.Audio.AudioColumns.DURATION)
+            val durI = c.getColumnIndexOrThrow(MediaStore.MediaColumns.DURATION)
             val rows = ArrayList<MediaRow>()
             while (c.moveToNext()) {
                 rows.add(
                     MediaRow(
-                        id = c.getLong(idI),
+                        rowUri = ContentUris.withAppendedId(collection, c.getLong(idI)),
                         name = c.getString(nameI) ?: "",
                         sizeBytes = c.getLong(sizeI),
                         durationMs = c.getLong(durI),
@@ -358,17 +384,13 @@ class SegmentStore(private val context: Context) {
             }
             rows
         } ?: emptyList()
-    } catch (e: Exception) {
-        Log.w(TAG, "MediaStore scan failed", e)
-        emptyList()
-    }
 
     private fun mediaStoreList(): List<SegmentInfo> = mediaStoreQuery()
         .filter { it.sizeBytes > 0L || it.durationMs > 0L }
         .map { r ->
         MediaSegmentInfo(
             mediaResolver = resolver,
-            rowUri = ContentUris.withAppendedId(mediaCollection, r.id),
+            rowUri = r.rowUri,
             // No duration suffix: the row cannot be renamed; duration comes from DURATION.
             name = r.name,
             sizeBytes = r.sizeBytes,
@@ -494,7 +516,7 @@ class SegmentStore(private val context: Context) {
     }
 
     private fun deleteMediaRow(r: MediaRow): Boolean = try {
-        resolver.delete(ContentUris.withAppendedId(mediaCollection, r.id), null, null) != 0
+        resolver.delete(r.rowUri, null, null) != 0
     } catch (e: Exception) {
         Log.w(TAG, "media row delete failed", e)
         false
@@ -545,26 +567,30 @@ class SegmentStore(private val context: Context) {
 
     /** Deletes MediaStore rows of segments the app died in the middle of. */
     private fun mediaStorePendingSweep(): Int = try {
+        sweepPending(mediaCollection, MUSIC_RELATIVE_PATH) + sweepPending(filesCollection, DOCUMENTS_RELATIVE_PATH)
+    } catch (e: Exception) {
+        Log.w(TAG, "pending sweep failed", e)
+        0
+    }
+
+    private fun sweepPending(collection: Uri, relativePath: String): Int {
         val selection = "${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ?" +
             " AND ${MediaStore.MediaColumns.IS_PENDING} = 1" +
             " AND ${MediaStore.MediaColumns.DATE_MODIFIED} < ?"
         val cutoffSec = (System.currentTimeMillis() - PENDING_SWEEP_MS) / 1000
-        resolver.query(
-            mediaCollection,
+        return resolver.query(
+            collection,
             arrayOf(MediaStore.MediaColumns._ID),
             selection,
-            arrayOf("$MUSIC_RELATIVE_PATH/%", cutoffSec.toString()),
+            arrayOf("$relativePath/%", cutoffSec.toString()),
             null,
         )?.use { c ->
             var n = 0
             while (c.moveToNext()) {
-                if (resolver.delete(ContentUris.withAppendedId(mediaCollection, c.getLong(0)), null, null) != 0) n++
+                if (resolver.delete(ContentUris.withAppendedId(collection, c.getLong(0)), null, null) != 0) n++
             }
             n
         } ?: 0
-    } catch (e: Exception) {
-        Log.w(TAG, "pending sweep failed", e)
-        0
     }
 
     private fun cleanupSaf(cap: Long, ageCutoff: Long): Int {

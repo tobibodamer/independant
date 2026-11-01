@@ -45,7 +45,18 @@ enum class Detector {
 
 /** Where finished speech segments land. Applies to NEW segments; an open recording keeps its sink. */
 enum class StorageMode {
-    /** Public Music folder via MediaStore (RELATIVE_PATH "Music/Pendant"), no permissions needed. */
+    /**
+     * Public Documents folder via MediaStore (RELATIVE_PATH "Documents/Pendant"), no
+     * permissions needed. The one-tree home: the capture log lives beside the clips in
+     * Documents/Pendant/events, so clips and metadata stay together for sync engines.
+     */
+    DOCUMENTS,
+    /**
+     * Public Music folder via MediaStore (RELATIVE_PATH "Music/Pendant"), no permissions
+     * needed. Keeps clips listed by music players, but Android refuses to store the
+     * capture log there (it only accepts audio under Music/), so the log publishes one
+     * tree over, in Documents/Pendant/events.
+     */
     MUSIC,
     /** App-private external dir (Android/data/…/files/recordings), always available. */
     APP_PRIVATE,
@@ -82,7 +93,7 @@ data class Settings(
     val startOnBoot: Boolean = false,
     val autoDeleteDays: Int = 0,
     val maxStorageGb: Int = 0,
-    val storageMode: StorageMode = StorageMode.MUSIC,
+    val storageMode: StorageMode = StorageMode.DOCUMENTS,
     val customTreeUri: String = "",
 ) {
     companion object {

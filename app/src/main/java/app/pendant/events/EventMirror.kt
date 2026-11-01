@@ -15,7 +15,9 @@ import java.io.RandomAccessFile
 
 /**
  * Copies event-log day files next to the clips:
- * - [StorageMode.MUSIC]: `Documents/Pendant/events/` (Android only admits audio under Music/)
+ * - [StorageMode.DOCUMENTS]: `Documents/Pendant/events/` — beside the clips.
+ * - [StorageMode.MUSIC]: `Documents/Pendant/events/` (Android only admits audio
+ *   under Music/, so the log goes one tree over).
  * - [StorageMode.CUSTOM]: `<picked tree>/Pendant/events/`
  * - [StorageMode.APP_PRIVATE]: nothing, the source files already sit beside the clips.
  *
@@ -30,7 +32,11 @@ internal class EventMirror(context: Context) {
     /** Identifies the mirror target, or null when nothing is mirrored. */
     fun targetKey(loc: SegmentStore.Location): String? = when (loc.mode) {
         StorageMode.APP_PRIVATE -> null
-        StorageMode.MUSIC -> "media"
+        // Distinct keys per mode even where the physical folder matches (MUSIC and
+        // DOCUMENTS both use Documents/Pendant/events): a mode switch then restarts
+        // the mirror from a full re-copy instead of trusting stale byte offsets.
+        StorageMode.DOCUMENTS -> "media:documents"
+        StorageMode.MUSIC -> "media:music"
         StorageMode.CUSTOM -> loc.customTreeUri.takeIf { it.isNotBlank() }?.let { "saf:$it" }
     }
 
@@ -60,6 +66,7 @@ internal class EventMirror(context: Context) {
 
     private fun resolve(loc: SegmentStore.Location, name: String): Uri? = when (loc.mode) {
         StorageMode.APP_PRIVATE -> null
+        StorageMode.DOCUMENTS -> mediaRow(name)
         StorageMode.MUSIC -> mediaRow(name)
         StorageMode.CUSTOM -> safDocument(loc.customTreeUri, name)
     }

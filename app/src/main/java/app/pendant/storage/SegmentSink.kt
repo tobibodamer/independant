@@ -10,6 +10,7 @@ import android.provider.MediaStore
 import android.util.Log
 import app.pendant.codec.SegmentDestination
 import app.pendant.codec.SegmentWriters
+import app.pendant.settings.StorageMode
 import java.io.BufferedOutputStream
 import java.io.File
 import java.io.FileOutputStream
@@ -60,8 +61,12 @@ class FileSegmentSink(private val dir: File, override val baseName: String) : Se
 }
 
 /**
- * Music-folder destination that buffers the segment in an app-private staging
- * folder and publishes the *finished* clip into `Music/Pendant` at finalize.
+ * MediaStore destination that buffers the segment in an app-private staging
+ * folder and publishes the *finished* clip into a public MediaStore folder at
+ * finalize: `Music/Pendant` ([StorageMode.MUSIC], Audio rows) or
+ * `Documents/Pendant` ([StorageMode.DOCUMENTS], Files rows — Android only
+ * admits audio under Music/, and Documents contributions go through the Files
+ * collection).
  *
  * Sync-friendly: the public folder only ever gains complete files under their
  * final `_NNs` name and nothing there is modified after creation — sync engines
@@ -77,6 +82,8 @@ class PublishingSegmentSink(
     context: Context,
     mime: String,
     override val baseName: String,
+    /** RELATIVE_PATH to publish under; Audio rows under Music/, Files rows elsewhere. */
+    private val relativePath: String = SegmentStore.MUSIC_RELATIVE_PATH,
 ) : SegmentSink() {
 
     private val resolver = context.contentResolver
@@ -117,10 +124,17 @@ class PublishingSegmentSink(
                 // Insert under the final, duration-suffixed name — no rename later.
                 put(MediaStore.MediaColumns.DISPLAY_NAME, finished.name)
                 put(MediaStore.MediaColumns.MIME_TYPE, mime)
-                put(MediaStore.MediaColumns.RELATIVE_PATH, SegmentStore.MUSIC_RELATIVE_PATH)
+                put(MediaStore.MediaColumns.RELATIVE_PATH, relativePath)
                 put(MediaStore.MediaColumns.IS_PENDING, 1)
             }
-            resolver.insert(MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY), values)
+            // Music/ lives in the Audio collection; Documents/ contributions use the
+            // generic Files collection.
+            val collection = if (relativePath == SegmentStore.MUSIC_RELATIVE_PATH) {
+                MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+            } else {
+                MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+            }
+            resolver.insert(collection, values)
         } catch (e: Exception) {
             Log.w(TAG, "publish insert failed", e)
             null
@@ -154,7 +168,7 @@ class PublishingSegmentSink(
             Log.w(TAG, "MediaStore publish failed", e)
         }
         try {
-            val duration = ContentValues().apply { put(MediaStore.Audio.AudioColumns.DURATION, durationMs) }
+            val duration = ContentValues().apply { put(MediaStore.MediaColumns.DURATION, durationMs) }
             resolver.update(row, duration, null, null)
         } catch (_: Exception) {
         }
