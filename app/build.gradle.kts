@@ -14,12 +14,32 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "0.1.0"
+        manifestPlaceholders["appLabel"] = "Pendant"
+    }
+
+    // Credentials live in ~/.gradle/gradle.properties; without them the release build stays unsigned.
+    val releaseStore = providers.gradleProperty("PENDANT_STORE_FILE").orNull
+    signingConfigs {
+        if (releaseStore != null) {
+            create("release") {
+                storeFile = file(releaseStore)
+                storePassword = providers.gradleProperty("PENDANT_STORE_PASSWORD").get()
+                keyAlias = providers.gradleProperty("PENDANT_KEY_ALIAS").get()
+                keyPassword = providers.gradleProperty("PENDANT_KEY_PASSWORD").get()
+            }
+        }
     }
 
     buildTypes {
+        debug {
+            applicationIdSuffix = ".debug"
+            manifestPlaceholders["appLabel"] = "Pendant Debug"
+        }
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            signingConfigs.findByName("release")?.let { signingConfig = it }
         }
     }
     compileOptions {

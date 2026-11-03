@@ -368,7 +368,7 @@ private fun share(context: android.content.Context, seg: SegmentInfo) {
         // shared via their own content URI; plain files via FileProvider.
         val uri = seg.shareContentUri() ?: FileProvider.getUriForFile(
             context,
-            "app.pendant.fileprovider",
+            "${context.packageName}.fileprovider",
             seg.backingFile ?: return,
         )
         val send = Intent(Intent.ACTION_SEND).apply {

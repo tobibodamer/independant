@@ -18,7 +18,7 @@
         android:name=".PendantApp"
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
-        android:label="@string/app_name"
+        android:label="${appLabel}"
         android:supportsRtl="true"
         android:theme="@style/Theme.Pendant">
 
@@ -59,7 +59,7 @@
 
         <provider
             android:name="androidx.core.content.FileProvider"
-            android:authorities="app.pendant.fileprovider"
+            android:authorities="${applicationId}.fileprovider"
             android:exported="false"
             android:grantUriPermissions="true">
             <meta-data
