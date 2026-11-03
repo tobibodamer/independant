@@ -11,6 +11,10 @@ A 24/7 speech-capture app for Android. It listens like a wearable pendant, recor
 🎙 24/7 mic → VAD gate → Opus (Ogg) encoder → one file per utterance
 ```
 
+<p align="center">
+  <img src="assets/listen.png" width="340" alt="Listen tab: live level meter while speaking, daily clip/speech/storage stats, battery-optimization card">
+</p>
+
 ## What it does
 
 - **Speech-only recording.** A hand-rolled adaptive energy VAD (high-pass → frame RMS → noise-floor tracking with hysteresis and onset confirmation) decides frame by frame (20 ms) whether you are speaking. Silence costs almost nothing: no encoder runs, no disk writes.
