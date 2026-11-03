@@ -9,7 +9,7 @@ android {
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "de.tobibodamer.independant"
+        applicationId = "io.github.tobibodamer.independant"
         minSdk = 29
         targetSdk = 35
         versionCode = 1

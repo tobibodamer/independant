@@ -173,10 +173,10 @@ class RecordingService : Service() {
     }
 
     companion object {
-        const val ACTION_START = "de.tobibodamer.independant.action.START"
-        const val ACTION_PAUSE = "de.tobibodamer.independant.action.PAUSE"
-        const val ACTION_RESUME = "de.tobibodamer.independant.action.RESUME"
-        const val ACTION_STOP = "de.tobibodamer.independant.action.STOP"
+        const val ACTION_START = "io.github.tobibodamer.independant.action.START"
+        const val ACTION_PAUSE = "io.github.tobibodamer.independant.action.PAUSE"
+        const val ACTION_RESUME = "io.github.tobibodamer.independant.action.RESUME"
+        const val ACTION_STOP = "io.github.tobibodamer.independant.action.STOP"
         private const val TAG = "PendantService"
     }
 }

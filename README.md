@@ -5,7 +5,7 @@
 A 24/7 speech-capture app for Android. It listens like a wearable pendant, records **only speech**, and stores every utterance as a small file — all locally, nothing leaves the phone.
 
 > **Private repo:** <https://github.com/tobibodamer/independant>
-> The name is the product: *independant* — an independent pendant that listens all day. The launcher label and clip folders keep the short form (`Pendant`, `Documents/Pendant`); the application ID is `de.tobibodamer.independant` (`.debug` suffix for debug builds).
+> The name is the product: *independant* — an independent pendant that listens all day. The launcher label and clip folders keep the short form (`Pendant`, `Documents/Pendant`); the application ID is `io.github.tobibodamer.independant` (`.debug` suffix for debug builds).
 
 ```
 🎙 24/7 mic → VAD gate → Opus (Ogg) encoder → one file per utterance
@@ -28,7 +28,7 @@ A 24/7 speech-capture app for Android. It listens like a wearable pendant, recor
 
 ## Capture log
 
-One file per local day, one JSON object per line: `Documents/Pendant/events/2026-10-30.jsonl` (both Music and Documents storage — beside the clips in Documents mode, one tree over in Music mode), `<custom folder>/Pendant/events/` (custom folder) or `Android/data/de.tobibodamer.independant/files/events/` (app-private, always the source of truth). Mirrors get state changes right away and heartbeats every 5 minutes, as appends.
+One file per local day, one JSON object per line: `Documents/Pendant/events/2026-10-30.jsonl` (both Music and Documents storage — beside the clips in Documents mode, one tree over in Music mode), `<custom folder>/Pendant/events/` (custom folder) or `Android/data/io.github.tobibodamer.independant/files/events/` (app-private, always the source of truth). Mirrors get state changes right away and heartbeats every 5 minutes, as appends.
 
 Every line has `t` (UTC epoch ms), `tz` (UTC offset at that instant), `up` (`elapsedRealtime` ms, exposes wall-clock jumps) and `e`:
 
