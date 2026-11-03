@@ -721,6 +721,9 @@ class RecordingEngine(
         drainSleepMs = minOf(BLOCK_MS.toLong(), grantedMs / 3).coerceAtLeast(FRAME_MS.toLong())
     }
 
+    // RECORD_AUDIO is verified by every entry point (MainActivity, PauseTileService)
+    // before the engine starts; candidates are retried/broken out of on failure.
+    @SuppressLint("MissingPermission")
     private fun openRecord(source: Int, target: AudioDeviceInfo?): Rec? {
         val minBuf = AudioRecord.getMinBufferSize(settings.sampleRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
         if (minBuf <= 0) return null
