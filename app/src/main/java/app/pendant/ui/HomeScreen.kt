@@ -19,7 +19,9 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -35,6 +37,7 @@ import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
+import androidx.compose.material3.VerticalDivider
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
@@ -152,10 +155,21 @@ fun HomeScreen(app: PendantApp, state: RecordingController.State) {
         )
 
         // ------- Today's stats -------
-        Row(Modifier.fillMaxWidth(), Arrangement.spacedBy(12.dp)) {
-            StatCard("Clips today", stats.segmentsToday.toString(), Modifier.weight(1f))
-            StatCard("Speech today", formatDuration(stats.secondsToday * 1000), Modifier.weight(1f))
-            StatCard("Storage", formatBytes(stats.totalBytes), Modifier.weight(1f))
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(
+                "Today",
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Card(colors = CardDefaults.cardColors()) {
+                Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min)) {
+                    StatCell(stats.segmentsToday.toString(), "Clips")
+                    VerticalDivider()
+                    StatCell(formatDuration(stats.secondsToday * 1000), "Speech")
+                    VerticalDivider()
+                    StatCell(formatBytes(stats.totalBytes), "Storage")
+                }
+            }
         }
 
         val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
@@ -179,12 +193,11 @@ fun HomeScreen(app: PendantApp, state: RecordingController.State) {
 }
 
 @Composable
-private fun StatCard(label: String, value: String, modifier: Modifier = Modifier) {
-    Card(modifier = modifier, colors = CardDefaults.cardColors()) {
-        Column(Modifier.padding(14.dp)) {
-            Text(value, style = MaterialTheme.typography.titleMedium)
-            Text(label, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
+private fun RowScope.StatCell(value: String, label: String) {
+    Column(Modifier.weight(1f).padding(horizontal = 16.dp, vertical = 14.dp)) {
+        Text(value, style = MaterialTheme.typography.titleMedium)
+        Spacer(Modifier.height(2.dp))
+        Text(label, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 

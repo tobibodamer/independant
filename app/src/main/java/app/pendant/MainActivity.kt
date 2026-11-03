@@ -40,6 +40,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import app.pendant.recording.RecordingController
 import app.pendant.ui.HomeScreen
+import app.pendant.ui.PendantWordmark
 import app.pendant.ui.PendantTheme
 import app.pendant.ui.RecordingsScreen
 import app.pendant.ui.SettingsScreen
@@ -95,11 +96,7 @@ fun AppRoot(app: PendantApp) {
 
     Scaffold(snackbarHost = { SnackbarHost(snackbar) }) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
-            Text(
-                "Pendant",
-                style = MaterialTheme.typography.headlineMedium,
-                modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
-            )
+            PendantWordmark(Modifier.padding(horizontal = 20.dp, vertical = 12.dp))
             if (!hasMic || !hasNotif) {
                 Column(Modifier.fillMaxWidth().padding(20.dp), Arrangement.spacedBy(12.dp)) {
                     Text(
