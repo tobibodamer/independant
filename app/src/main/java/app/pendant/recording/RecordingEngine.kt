@@ -78,6 +78,12 @@ class RecordingEngine(
     private var statSpeechFrames = 0
     private var statLevelSumDb = 0.0
 
+    // Live segment progress for the on-screen indicator (capture thread only;
+    // -1 while no segment is open).
+    private var liveSegmentMs = -1L
+    private var liveSpeechMs = 0L
+    private var liveSilenceMs = 0L
+
     // Overrun detection on the first source (guarded by recs).
     private var firstSourceFramesRead = 0L
     private var backlogBaselineFrames = -1L
@@ -146,6 +152,7 @@ class RecordingEngine(
         events.log("pause")
         releaseWakeLock()
         RecordingController.postMeter(null)
+        RecordingController.postLiveSegment(null)
         RecordingController.postSourceLabel("Paused")
     }
 
@@ -179,6 +186,7 @@ class RecordingEngine(
         events.log("stop")
         events.close()
         RecordingController.postMeter(null)
+        RecordingController.postLiveSegment(null)
         segmenter = null
         releaseWakeLock()
         RecordingController.postSourceLabel("")
@@ -289,6 +297,17 @@ class RecordingEngine(
                         RecordingController.postMeter(
                             RecordingController.MicMeter(meterSmooth, vad.enterThresholdDb, speech),
                         )
+                        if (liveSegmentMs >= 0) {
+                            RecordingController.postLiveSegment(
+                                RecordingController.LiveSegment(
+                                    durationMs = liveSegmentMs,
+                                    speechMs = liveSpeechMs,
+                                    silenceMs = liveSilenceMs,
+                                    minSegmentMs = settings.minSegmentMs,
+                                    hangoverMs = settings.hangoverSec * 1000L,
+                                ),
+                            )
+                        }
                     }
                     val frameEndMs = readEndMs - (total - off) * 1000L / settings.sampleRate
                     segmenter?.feed(mixed, count, speech, frameEndMs)
@@ -364,6 +383,8 @@ class RecordingEngine(
         }
 
         override fun onSegmentStored(sink: SegmentSink, clipStartMs: Long, durationMs: Long, speechMs: Long) {
+            liveSegmentMs = -1L
+            RecordingController.postLiveSegment(null)
             try {
                 sink.finalize(durationMs)
             } catch (e: Exception) {
@@ -387,10 +408,20 @@ class RecordingEngine(
         }
 
         override fun onSegmentDiscarded() {
+            liveSegmentMs = -1L
+            RecordingController.postLiveSegment(null)
             RecordingController.postError(null)
         }
 
+        override fun onSegmentProgress(durationMs: Long, speechMs: Long, silenceMs: Long) {
+            liveSegmentMs = durationMs
+            liveSpeechMs = speechMs
+            liveSilenceMs = silenceMs
+        }
+
         override fun onVoiceActive(active: Boolean) {
+            // During the hangover hold this flips to false while the segment is
+            // still open — the close callbacks below are what end the live view.
             RecordingController.postVoiceActive(active)
         }
     }

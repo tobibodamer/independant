@@ -40,6 +40,14 @@ class Segmenter(
         /** Called when a segment was discarded (too short to be useful). */
         fun onSegmentDiscarded()
 
+        /**
+         * Live progress of the open segment, once per frame (20 ms). [durationMs]
+         * counts everything written so far (pre-roll included), [speechMs] only the
+         * part judged as speech, [silenceMs] the silence since the last speech.
+         * The listener decides whether anyone is watching.
+         */
+        fun onSegmentProgress(durationMs: Long, speechMs: Long, silenceMs: Long)
+
         /** Live state for UI/battery: true while speech was recently heard (hangover running). */
         fun onVoiceActive(active: Boolean)
     }
@@ -85,6 +93,7 @@ class Segmenter(
         } else {
             silenceMs += count * 1000 / sampleRate
         }
+        listener.onSegmentProgress(durationMs.toLong(), speechMs, silenceMs.toLong())
         // Display honesty: "You're speaking" bridges only tiny inter-word pauses
         // (1.2 s). The 5 s file hangover is storage policy — showing it as live
         // speech made the status card lie for up to 5 s (and refreshed on every

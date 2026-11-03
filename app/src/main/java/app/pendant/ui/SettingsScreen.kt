@@ -484,7 +484,8 @@ private fun LabeledSlider(
 }
 
 /** Absolute dB range the meter bar covers (quiet room ≈ 20, loud speech ≈ 50–60). */
-private const val METER_DB_MAX = 70f
+/** Top of the level-meter scale, shared with the home-screen live waveform. */
+internal const val METER_DB_MAX = 70f
 private const val METER_RATE = 16_000
 
 /**

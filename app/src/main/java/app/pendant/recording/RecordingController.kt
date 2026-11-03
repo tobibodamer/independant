@@ -35,6 +35,28 @@ object RecordingController {
         _meter.value = m
     }
 
+    /**
+     * Live progress of the segment currently being recorded. Published on the same
+     * "only while a screen watches" budget as [meter], so the capture loop stays
+     * cheap whenever the app is in the background. [silenceMs]/[hangoverMs] let the
+     * UI show the hold window: the segment stays open for [hangoverMs] of silence
+     * before it closes, and speech within it continues the same clip.
+     */
+    data class LiveSegment(
+        val durationMs: Long,
+        val speechMs: Long,
+        val silenceMs: Long,
+        val minSegmentMs: Long,
+        val hangoverMs: Long,
+    )
+
+    private val _liveSegment = MutableStateFlow<LiveSegment?>(null)
+    val liveSegment: StateFlow<LiveSegment?> = _liveSegment
+
+    fun postLiveSegment(s: LiveSegment?) {
+        _liveSegment.value = s
+    }
+
     private val _state = MutableStateFlow(State.IDLE)
     val state: StateFlow<State> = _state
 
@@ -48,6 +70,7 @@ object RecordingController {
         _state.value = state
         if (state != State.PAUSED && state != State.RECORDING) {
             _stats.value = _stats.value.copy(voiceActive = false)
+            _liveSegment.value = null
         }
     }
 

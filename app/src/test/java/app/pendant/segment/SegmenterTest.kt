@@ -56,6 +56,9 @@ class SegmenterTest {
             discarded++
         }
 
+        override fun onSegmentProgress(durationMs: Long, speechMs: Long, silenceMs: Long) {
+        }
+
         override fun onVoiceActive(active: Boolean) {
         }
     }
