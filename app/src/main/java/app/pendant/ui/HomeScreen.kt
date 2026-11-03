@@ -317,15 +317,17 @@ private fun requestBatteryIgnore(context: Context) {
     }
 }
 
+/** Compact duration: "18 s", "12 min", "2.5 h" — glanceable, never wraps a stat cell. */
 fun formatDuration(ms: Long): String {
     val totalSec = ms / 1000
     val h = totalSec / 3600
-    val m = (totalSec % 3600) / 60
-    val s = totalSec % 60
     return when {
-        h > 0 -> "%d h %02d min".format(h, m)
-        m > 0 -> "%d min %02d s".format(m, s)
-        else -> "%d s".format(s)
+        h > 0 -> {
+            val tenth = (totalSec % 3600) * 10 / 3600
+            if (tenth == 0L) "$h h" else "$h.$tenth h"
+        }
+        totalSec >= 60 -> "${totalSec / 60} min"
+        else -> "$totalSec s"
     }
 }
 
