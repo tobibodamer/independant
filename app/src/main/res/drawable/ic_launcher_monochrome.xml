@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Monochrome layer for Android 13+ themed icons: the same glyph, single color
+     (the system tints it). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="4.28"
+        android:fillColor="#00000000"
+        android:pathData="M54,30.47 m-7.13,0 a7.13,7.13 0 1,0 14.26,0 a7.13,7.13 0 1,0 -14.26,0" />
+    <path
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="3.92"
+        android:strokeLineCap="round"
+        android:fillColor="#00000000"
+        android:pathData="M54,37.6 L54,44.02" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,42.59 L76.82,61.13 L54,86.8 L31.18,61.13 Z" />
+</vector>
