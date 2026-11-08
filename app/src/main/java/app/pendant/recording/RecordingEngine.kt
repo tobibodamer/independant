@@ -16,6 +16,8 @@ import android.util.Log
 import app.pendant.audio.AudioRoutes
 import app.pendant.audio.ScoController
 import app.pendant.codec.SegmentWriters
+import app.pendant.capture.CaptureProtocol
+import app.pendant.capture.InputFacts
 import app.pendant.events.EventLog
 import app.pendant.recording.RecordingController
 import app.pendant.segment.Segmenter
@@ -58,7 +60,11 @@ class RecordingEngine(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     private val running = AtomicBoolean(false)
+    /** The user's pause (button, tile, notification). */
     private val paused = AtomicBoolean(false)
+    /** The capture service's `off` assignment; kept apart from [paused] so neither undoes the other. */
+    private val remoteOff = AtomicBoolean(false)
+    private fun idle() = paused.get() || remoteOff.get()
     @Volatile private var routeDirty = true
 
     private var thread: Thread? = null
@@ -66,6 +72,12 @@ class RecordingEngine(
     private var lastErrorPostMs = 0L
 
     private val events = EventLog(context)
+    /** Status lines for hippo connect, beside the clips; written only while a capture service is in use. */
+    private val statusLog by lazy { EventLog(context, STATUS_DIR) }
+    @Volatile private var captureManaged = false
+    private var lastStatus: String? = null
+    /** Called when the phone's input changes state or what it is doing (the capture agent sends a heartbeat). */
+    @Volatile var onInputChanged: (() -> Unit)? = null
     /** Label of the opened route; shown again once another app stops silencing us. */
     @Volatile private var routeLabel = ""
     private var loggedRoute: Pair<String, Boolean>? = null
@@ -146,22 +158,76 @@ class RecordingEngine(
 
     fun pause() {
         if (!running.get() || paused.getAndSet(true)) return
-        // Gracefully end any open segment and free the mic while paused.
-        segmenter?.finishCurrent(store = true)
-        closeSources()
-        events.log("pause")
-        releaseWakeLock()
-        RecordingController.postMeter(null)
-        RecordingController.postLiveSegment(null)
-        RecordingController.postSourceLabel("Paused")
+        if (!remoteOff.get()) enterIdle("Paused", by = null)
+        inputChanged()
     }
 
     fun resume() {
         if (!running.get() || !paused.getAndSet(false)) return
-        events.log("resume")
+        if (!remoteOff.get()) leaveIdle(by = null)
+        inputChanged()
+    }
+
+    /**
+     * The capture service says another input records now (`off`) or this one should (`false`).
+     * Stops after finishing the open clip, like a pause, but the user's pause stays theirs.
+     */
+    fun setRemoteOff(off: Boolean) {
+        if (remoteOff.getAndSet(off) == off) return
+        if (!running.get()) return
+        if (!paused.get()) {
+            if (off) enterIdle("Another device records", by = CAPTURE_BY) else leaveIdle(by = CAPTURE_BY)
+        }
+        inputChanged()
+    }
+
+    /** Gracefully ends any open segment and frees the mic while idle. */
+    private fun enterIdle(label: String, by: String?) {
+        segmenter?.finishCurrent(store = true)
+        closeSources()
+        events.log("pause") { if (by != null) put("by", by) }
+        releaseWakeLock()
+        RecordingController.postMeter(null)
+        RecordingController.postLiveSegment(null)
+        RecordingController.postSourceLabel(label)
+    }
+
+    private fun leaveIdle(by: String?) {
+        events.log("resume") { if (by != null) put("by", by) }
         loggedRoute = null
         acquireWakeLock()
         routeDirty = true
+    }
+
+    /** What the capture service wants to know about this phone's input, right now. */
+    fun inputFacts() = InputFacts(
+        running = running.get(),
+        permitted = androidx.core.content.ContextCompat.checkSelfPermission(
+            context, android.Manifest.permission.RECORD_AUDIO,
+        ) == android.content.pm.PackageManager.PERMISSION_GRANTED,
+        userPaused = paused.get(),
+        silenced = silenced,
+        remoteOff = remoteOff.get(),
+    )
+
+    /** Starts (or stops) writing status lines; the current state is written at once. */
+    fun setCaptureManaged(on: Boolean) {
+        if (captureManaged == on) return
+        captureManaged = on
+        lastStatus = null
+        if (on) inputChanged() else setRemoteOff(false)
+    }
+
+    private fun inputChanged() {
+        if (captureManaged) {
+            val status = inputFacts().status
+            if (status != lastStatus) {
+                lastStatus = status
+                statusLog.location = events.location
+                statusLog.logRaw(CaptureProtocol.statusLine(Instant.now(), ZoneId.systemDefault(), status))
+            }
+        }
+        onInputChanged?.invoke()
     }
 
     fun stop() {
@@ -182,9 +248,14 @@ class RecordingEngine(
         unregisterDeviceCallback()
         unregisterRecordingCallback()
         paused.set(false)
+        remoteOff.set(false)
         closeSources()
         events.log("stop")
         events.close()
+        if (captureManaged) {
+            captureManaged = false
+            statusLog.close()
+        }
         RecordingController.postMeter(null)
         RecordingController.postLiveSegment(null)
         segmenter = null
@@ -244,7 +315,7 @@ class RecordingEngine(
                     openSources()
                     continue
                 }
-                if (paused.get()) {
+                if (idle()) {
                     Thread.sleep(200)
                     continue
                 }
@@ -539,6 +610,7 @@ class RecordingEngine(
             silenced = now
             events.log(if (now) "silenced" else "unsilenced")
             RecordingController.postSourceLabel(if (now) "Mic in use by another app" else routeLabel)
+            inputChanged()
         }
     }
 
@@ -603,7 +675,7 @@ class RecordingEngine(
     private fun openSources() {
         closeSources()
         carry = 0
-        if (paused.get()) return
+        if (idle()) return
         val label = openPlannedRoute()
         val open = synchronized(recs) { recs.isNotEmpty() }
         routeLabel = label
@@ -842,6 +914,8 @@ class RecordingEngine(
 
     companion object {
         private const val TAG = "PendantEngine"
+        private const val STATUS_DIR = "status"
+        private const val CAPTURE_BY = "capture"
         const val FRAME_MS = 20
         /** Frames per drain cycle while nobody watches the level meter. */
         private const val BLOCK_FRAMES = 25

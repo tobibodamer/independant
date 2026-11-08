@@ -28,10 +28,10 @@ import java.util.concurrent.TimeUnit
  * [MIRROR_INTERVAL_MS] for heartbeats, so sync tools see few small appends.
  * All I/O runs on one background thread, never on the capture thread.
  */
-class EventLog(context: Context) {
+class EventLog(context: Context, dirName: String = DIR_NAME) {
 
-    private val dir = File(context.getExternalFilesDir(null) ?: context.filesDir, DIR_NAME)
-    private val mirror = EventMirror(context)
+    private val dir = File(context.getExternalFilesDir(null) ?: context.filesDir, dirName)
+    private val mirror = EventMirror(context, dirName)
     private val executor: ExecutorService =
         Executors.newSingleThreadExecutor { r -> Thread(r, "pendant-events").apply { isDaemon = true } }
 
@@ -56,8 +56,16 @@ class EventLog(context: Context) {
             .put("e", event)
             .apply(fill)
             .build()
+        write(line, instant, zone, urgent = event != ALIVE)
+    }
+
+    /** Appends an already-built line to the day file of [instant] and mirrors it right away. */
+    fun logRaw(line: String, instant: Instant = Instant.now(), zone: ZoneId = ZoneId.systemDefault()) =
+        write(line, instant, zone, urgent = true)
+
+    private fun write(line: String, instant: Instant, zone: ZoneId, urgent: Boolean) {
+        val now = instant.toEpochMilli()
         val day = DAY_FORMAT.format(instant.atZone(zone)) + EXTENSION
-        val urgent = event != ALIVE
         submit {
             append(day, line)
             if (urgent || now - lastMirrorMs >= MIRROR_INTERVAL_MS) mirrorPending(now)

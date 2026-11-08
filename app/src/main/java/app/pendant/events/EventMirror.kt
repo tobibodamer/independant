@@ -23,7 +23,9 @@ import java.io.RandomAccessFile
  *
  * Runs on the event-log thread only.
  */
-internal class EventMirror(context: Context) {
+internal class EventMirror(context: Context, private val dirName: String = EventLog.DIR_NAME) {
+
+    private val mediaRelativePath = "Documents/Pendant/$dirName"
 
     private val resolver = context.contentResolver
     /** Resolved target URI per "<targetKey>/<day file>". */
@@ -78,7 +80,7 @@ internal class EventMirror(context: Context) {
             filesCollection,
             arrayOf(MediaStore.MediaColumns._ID),
             "${MediaStore.MediaColumns.RELATIVE_PATH} = ? AND ${MediaStore.MediaColumns.DISPLAY_NAME} = ?",
-            arrayOf("$MEDIA_RELATIVE_PATH/", name),
+            arrayOf("$mediaRelativePath/", name),
             null,
         )?.use { c ->
             if (c.moveToFirst()) return android.content.ContentUris.withAppendedId(filesCollection, c.getLong(0))
@@ -87,7 +89,7 @@ internal class EventMirror(context: Context) {
             put(MediaStore.MediaColumns.DISPLAY_NAME, name)
             // octet-stream keeps the .jsonl name as is (a text MIME type would append ".txt").
             put(MediaStore.MediaColumns.MIME_TYPE, MIME)
-            put(MediaStore.MediaColumns.RELATIVE_PATH, MEDIA_RELATIVE_PATH)
+            put(MediaStore.MediaColumns.RELATIVE_PATH, mediaRelativePath)
         }
         return resolver.insert(filesCollection, values)
     }
@@ -95,7 +97,7 @@ internal class EventMirror(context: Context) {
     private fun safDocument(treeUriString: String, name: String): Uri? {
         val tree = Uri.parse(treeUriString)
         val pendant = safDirUri(resolver, tree, SegmentStore.SAF_DIR_NAME, createIfMissing = true) ?: return null
-        val events = child(tree, pendant, EventLog.DIR_NAME, DocumentsContract.Document.MIME_TYPE_DIR) ?: return null
+        val events = child(tree, pendant, dirName, DocumentsContract.Document.MIME_TYPE_DIR) ?: return null
         return child(tree, events, name, MIME)
     }
 
@@ -118,7 +120,6 @@ internal class EventMirror(context: Context) {
     }
 
     companion object {
-        const val MEDIA_RELATIVE_PATH = "Documents/Pendant/events"
         private const val MIME = "application/octet-stream"
     }
 }

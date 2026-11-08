@@ -95,7 +95,15 @@ data class Settings(
     val maxStorageGb: Int = 0,
     val storageMode: StorageMode = StorageMode.DOCUMENTS,
     val customTreeUri: String = "",
+    /** Optional: report this phone to a capture service and follow its assignments. */
+    val captureEnabled: Boolean = false,
+    val captureUrl: String = "",
+    val captureToken: String = "",
 ) {
+    /** This settings with the capture-service fields taken from [other]. */
+    fun withCaptureOf(other: Settings) =
+        copy(captureEnabled = other.captureEnabled, captureUrl = other.captureUrl, captureToken = other.captureToken)
+
     companion object {
         fun hangoverChoices() = intArrayOf(3, 4, 5, 6, 7, 8, 10, 15, 20, 30)
         fun bitrateChoices() = intArrayOf(16_000, 24_000, 32_000, 48_000)
@@ -131,6 +139,9 @@ class PendantSettings(private val context: Context) {
         val maxStorageGb = intPreferencesKey("max_storage_gb")
         val storageMode = stringPreferencesKey("storage_mode")
         val customTreeUri = stringPreferencesKey("custom_tree_uri")
+        val captureEnabled = intPreferencesKey("capture_enabled")
+        val captureUrl = stringPreferencesKey("capture_url")
+        val captureToken = stringPreferencesKey("capture_token")
     }
 
     val settings: Flow<Settings> = context.dataStore.data.map { p ->
@@ -162,6 +173,9 @@ class PendantSettings(private val context: Context) {
             storageMode = p[Keys.storageMode]?.let { runCatching { StorageMode.valueOf(it) }.getOrNull() }
                 ?: Settings().storageMode,
             customTreeUri = p[Keys.customTreeUri] ?: "",
+            captureEnabled = (p[Keys.captureEnabled] ?: 0) == 1,
+            captureUrl = p[Keys.captureUrl] ?: "",
+            captureToken = p[Keys.captureToken] ?: "",
         )
     }
 
@@ -188,4 +202,9 @@ class PendantSettings(private val context: Context) {
     suspend fun setMaxStorageGb(v: Int) = context.dataStore.edit { it[Keys.maxStorageGb] = v }
     suspend fun setStorageMode(v: StorageMode) = context.dataStore.edit { it[Keys.storageMode] = v.name }
     suspend fun setCustomTreeUri(v: String) = context.dataStore.edit { it[Keys.customTreeUri] = v }
+    suspend fun setCaptureEnabled(v: Boolean) = context.dataStore.edit { it[Keys.captureEnabled] = if (v) 1 else 0 }
+    suspend fun setCaptureService(url: String, token: String) = context.dataStore.edit {
+        it[Keys.captureUrl] = url.trim()
+        it[Keys.captureToken] = token.trim()
+    }
 }

@@ -80,4 +80,6 @@ dependencies {
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.31.1")
 
     testImplementation("junit:junit:4.13.2")
+    // android.jar only has stubs of org.json; unit tests need the real thing.
+    testImplementation("org.json:json:20240303")
 }
