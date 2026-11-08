@@ -2,7 +2,7 @@
 
 # inde**pendant**
 
-A 24/7 speech-capture app for Android. It listens like a wearable pendant, records **only speech**, and stores every utterance as a small file — all locally, nothing leaves the phone.
+A 24/7 speech-capture app for Android. It listens like a wearable pendant, records **only speech**, and stores every utterance as a small file — all locally, nothing leaves the phone unless you switch on the optional [capture service](#capture-service) link.
 
 > **Private repo:** <https://github.com/tobibodamer/independant>
 > The name is the product: *independant* — an independent pendant that listens all day. The launcher label and clip folders keep the short form (`Pendant`, `Documents/Pendant`); the application ID is `io.github.tobibodamer.independant` (`.debug` suffix for debug builds).
@@ -29,6 +29,16 @@ A 24/7 speech-capture app for Android. It listens like a wearable pendant, recor
 - **Optional status-bar indicator.** Either a visible recording icon or a "quiet" notification with no icon (activity stays visible in the shade either way — Android requires an ongoing notification for background capture).
 - **Storage, location & care.** Clips land by default in your phone's public **Documents/Pendant** folder (no permissions needed, visible in any file app so you can play or export clips anywhere). Segments are finished in an app-private staging area first and only *complete* clips — already carrying their `…_42s.opus` duration suffix — appear in the folder, which makes it safe to watch with a sync tool (Syncthing et al.): sync never sees partial or renamed audio. The daily capture log lives right beside the clips in `Documents/Pendant/events`, so clips and their metadata form **one tree** you can sync with a single folder pair. Settings → *Storage location* offers three alternatives: a public **Music/Pendant** folder (listed by music-player apps; the capture log cannot live there — Android only admits audio under Music — and publishes to `Documents/Pendant/events` one tree over), an **app-private folder** (invisible to other apps), and a **custom folder** picked with the system folder picker (the app keeps durable access and creates a `Pendant` subfolder inside it). If publishing a finished clip fails (full disk, provider error), it is rescued to the app-private listing instead of dropped. Switching the location applies to **new clips** (the recording in progress keeps its folder); the Recordings tab lists, plays, shares and deletes clips from every location in one place. Optional auto-delete after N days and a size cap (oldest first) run across all locations.
 - **Capture log.** A gap between clips can mean silence, a pause, another app holding the mic, or a dead service. A daily event log tells them apart (see [Capture log](#capture-log)), and every clip carries its own metadata tags.
+
+## Capture service
+
+Optional, off by default (Settings → *Capture service*: URL and this phone's token). The phone then acts as the `phone` agent of a capture service: one input, `builtin` (kind `microphone`), reported by a long-polling heartbeat (`POST /v1/capture/heartbeat?wait=25`) from the recording service.
+
+- **Follows the assignment.** On `off` it finishes the open clip, frees the microphone and stays idle; on a recording mode it records. The user's own pause stays separate, and while paused (or the mic is missing or held by a call) the input reports `unavailable`, so it never holds the slot.
+- **Lease on `elapsedRealtime`.** If no good answer arrives within `valid_for` seconds (offline, timeout, any non-200), the phone records anyway: duplicates, never a gap.
+- **Heartbeat at once** on a state change or a network change; a goodbye (`"inputs": []`) when recording stops or the link is switched off.
+- **Status lines** (`{"at": …, "state": "recording|paused|unavailable"}`) go to `status/<day>.jsonl`, mirrored beside the clips like the capture log (`Documents/Pendant/status`).
+- The service URL may be plain `http` (e.g. over Tailscale), so cleartext traffic is allowed. The token is stored unencrypted in the app's private settings.
 
 ## Capture log
 

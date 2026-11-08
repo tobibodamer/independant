@@ -31,6 +31,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.RadioButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -51,9 +52,11 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import app.pendant.PendantApp
+import app.pendant.capture.CaptureController
 import app.pendant.recording.RecordingController
 import app.pendant.settings.BuiltinMicPref
 import app.pendant.settings.RouteMode
@@ -357,6 +360,8 @@ fun SettingsScreen(app: PendantApp) {
                 } + " — applies to new clips",
             )
         }
+
+        CaptureServiceSection(app, settings)
 
         Section("Storage") {
             ChoiceRow(
@@ -725,5 +730,67 @@ private fun MicLevelMeter(
                     "Applies immediately, also during recording."
             },
         )
+    }
+}
+
+/**
+ * Optional link to a capture service: this phone reports its microphone and follows the
+ * service's assignment (it pauses while another device records). Off by default; nothing
+ * leaves the phone until it is switched on and filled in.
+ */
+@Composable
+private fun CaptureServiceSection(app: PendantApp, settings: Settings) {
+    val scope = rememberCoroutineScope()
+    val status by CaptureController.status.collectAsState()
+    var url by remember(settings.captureUrl) { mutableStateOf(settings.captureUrl) }
+    var token by remember(settings.captureToken) { mutableStateOf(settings.captureToken) }
+    val dirty = url.trim() != settings.captureUrl || token.trim() != settings.captureToken
+
+    Section("Capture service") {
+        SwitchRow(
+            "Connect to a capture service",
+            settings.captureEnabled,
+            "Reports this microphone to your other devices' coordinator and pauses while another one records.",
+        ) { scope.launch { app.settings.setCaptureEnabled(it) } }
+        if (settings.captureEnabled) {
+            OutlinedTextField(
+                value = url,
+                onValueChange = { url = it },
+                label = { Text("Service URL") },
+                placeholder = { Text("http://host:7760") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            OutlinedTextField(
+                value = token,
+                onValueChange = { token = it },
+                label = { Text("Token") },
+                singleLine = true,
+                visualTransformation = PasswordVisualTransformation(),
+                modifier = Modifier.fillMaxWidth(),
+            )
+            if (dirty) {
+                Button(onClick = { scope.launch { app.settings.setCaptureService(url, token) } }) { Text("Save") }
+            }
+            Note(
+                when {
+                    settings.captureUrl.isBlank() || settings.captureToken.isBlank() -> "Enter the service URL and this phone's token."
+                    !RecordingController.state.collectAsState().value.let {
+                        it == RecordingController.State.RECORDING || it == RecordingController.State.PAUSED
+                    } -> "Connects once recording is started."
+                    else -> when (val st = status) {
+                        CaptureController.Status.Off -> "Not connected."
+                        CaptureController.Status.Connecting -> "Connecting…"
+                        is CaptureController.Status.Connected -> when (st.mode) {
+                            "off" -> "Connected. Another device records, this phone is paused."
+                            null -> "Connected. Nothing assigned, recording."
+                            else -> "Connected. This phone records."
+                        }
+                        is CaptureController.Status.Failing -> "No answer (${st.reason}). Recording on its own until the service is back."
+                    }
+                },
+            )
+            Note("Clips and status lines still sync as before. The token is stored on this phone only.")
+        }
     }
 }

@@ -9,6 +9,7 @@ import android.os.IBinder
 import android.util.Log
 import app.pendant.Notifications
 import app.pendant.PendantApp
+import app.pendant.capture.CaptureAgent
 import app.pendant.settings.Settings
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -26,6 +27,8 @@ import kotlinx.coroutines.flow.first
 class RecordingService : Service() {
 
     private var engine: RecordingEngine? = null
+    private var agent: CaptureAgent? = null
+    private var agentKey: Triple<Boolean, String, String>? = null
     private var settingsSnap: Settings? = null
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
@@ -40,9 +43,13 @@ class RecordingService : Service() {
                 val prev = previous
                 settingsSnap = s
                 if (prev != null && s != prev) {
-                    Log.i(TAG, "settings changed, reconfiguring")
-                    this@RecordingService.engine?.reconfigure(s)
-                    updateNotification()
+                    // The capture-service fields do not touch recording; leave the microphone alone.
+                    if (s.withCaptureOf(prev) != prev) {
+                        Log.i(TAG, "settings changed, reconfiguring")
+                        this@RecordingService.engine?.reconfigure(s)
+                        updateNotification()
+                    }
+                    syncAgent(s)
                 }
                 previous = s
             }
@@ -82,6 +89,7 @@ class RecordingService : Service() {
                 RecordingController.post(RecordingController.State.RECORDING)
             }
             ACTION_STOP -> {
+                stopAgent()
                 engine?.stop()
                 engine = null
                 RecordingController.post(RecordingController.State.IDLE)
@@ -118,6 +126,29 @@ class RecordingService : Service() {
         engine = RecordingEngine(this, s, app.store, app.recordings)
         engine!!.start()
         RecordingController.post(RecordingController.State.RECORDING)
+        syncAgent(s)
+    }
+
+    /** Runs the optional capture agent exactly while it is enabled and configured, and the engine runs. */
+    @Synchronized
+    private fun syncAgent(s: Settings) {
+        val e = engine
+        val wanted = e != null && s.captureEnabled && s.captureUrl.isNotBlank() && s.captureToken.isNotBlank()
+        val key = if (wanted) Triple(true, s.captureUrl, s.captureToken) else null
+        if (key == agentKey) return
+        stopAgent()
+        if (wanted && e != null) {
+            agentKey = key
+            agent = CaptureAgent(this, e, s.captureUrl, s.captureToken).also { it.start() }
+        }
+    }
+
+    /** Says goodbye to the capture service (briefly blocking), so the other devices take over at once. */
+    private fun stopAgent() {
+        val a = agent ?: return
+        agent = null
+        agentKey = null
+        runBlocking { a.stop() }
     }
 
     private fun goForeground(indicator: app.pendant.settings.StatusBarIndicator) {
@@ -166,6 +197,7 @@ class RecordingService : Service() {
     }
 
     override fun onDestroy() {
+        stopAgent()
         scope.cancel()
         engine?.stop()
         engine = null

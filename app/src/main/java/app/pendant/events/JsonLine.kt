@@ -21,6 +21,9 @@ class JsonLine {
         if (value.isFinite()) sb.append(String.format(Locale.US, "%.${decimals}f", value)) else sb.append("null")
     }
 
+    /** Inserts [json] (already valid JSON, such as an array) unquoted. */
+    fun putRaw(key: String, json: String): JsonLine = key(key).apply { sb.append(json) }
+
     fun build(): String = sb.toString() + "}"
 
     private fun key(key: String): JsonLine {
